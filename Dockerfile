@@ -7,6 +7,9 @@ FROM eclipse-temurin:21-jdk AS build
 WORKDIR /app
 COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
+# mvnw's executable bit is sometimes lost when committed from a Windows filesystem - restore it
+# explicitly rather than depending on git's tracked file mode.
+RUN chmod +x mvnw
 RUN ./mvnw -B -q dependency:go-offline
 COPY src/ src/
 RUN ./mvnw -B -q clean package -DskipTests
