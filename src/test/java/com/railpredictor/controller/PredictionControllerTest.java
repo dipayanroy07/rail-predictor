@@ -185,6 +185,16 @@ class PredictionControllerTest {
     }
 
     @Test
+    void anUnmappedPathReturnsARealNotFoundRatherThanAMisleadingInternalError() throws Exception {
+        // Regression test: an unmapped path (e.g. the bare "/" root) previously fell through to
+        // GlobalExceptionHandler's generic Exception.class catch-all and surfaced as a confusing
+        // 500 INTERNAL_ERROR - it must be a genuine 404 instead.
+        mockMvc.perform(get("/"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    @Test
     void controllerCallsTheExistingPredictionServiceExactlyOnce() throws Exception {
         when(predictionService.getPrediction(eq("12952"))).thenReturn(validResult());
 

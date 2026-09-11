@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.NoHandlerFoundException;
 
 /**
  * Maps every exception the API can throw to the one consistent {@link ErrorResponse} envelope -
@@ -85,6 +86,16 @@ public class GlobalExceptionHandler {
                 request.getRequestURI(), ex.getClass().getSimpleName(), ex.getMessage());
         return build(HttpStatus.SERVICE_UNAVAILABLE, "EXTERNAL_SERVICE_UNAVAILABLE",
                 "The train data service is temporarily unavailable. Please try again later.", request);
+    }
+
+    /** A request to a path/method with no matching handler at all (e.g. the bare "/" root, or a
+     * typo'd endpoint) - a genuine 404, never the generic 500 the catch-all below would otherwise
+     * produce for it. Requires {@code spring.mvc.throw-exception-if-no-handler-found=true} (see
+     * application.properties) so this exception is actually thrown instead of falling through to
+     * static-resource/Whitelabel handling. */
+    @ExceptionHandler(NoHandlerFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNoHandlerFound(NoHandlerFoundException ex, HttpServletRequest request) {
+        return build(HttpStatus.NOT_FOUND, "NOT_FOUND", "No such endpoint: " + request.getRequestURI(), request);
     }
 
     /** Last resort: never let a raw stack trace or exception message reach a client. */
