@@ -287,6 +287,87 @@ class HistoricalObservationMapperTest {
         assertThat(observations.get(0).stationCode()).isEqualTo("BBL");
     }
 
+    // --- Phase 23A: a genuine past event can never be after observedAt, regardless of status ---
+
+    @Test
+    void aDepartedStopWhoseActualArrivalIsStillInTheFutureRelativeToObservedAtIsNotEligible() {
+        // Regression test for a real anomaly found via Phase 23 real-data accumulation: train
+        // 12259 reported status "departed" (not "upcoming") for station LHU, yet actualArrival was
+        // still ~15 minutes after the instant the response was fetched - RailRadar had evidently
+        // already committed to a projected/estimated arrival before the train had genuinely reached
+        // it. The status-based check alone does not catch this; only comparing the parsed
+        // timestamp against observedAt does. FIXED_CLOCK (and therefore observedAt) is
+        // 2026-09-09T15:00:00Z.
+        RouteStop departedButActuallyFuture = new RouteStop(287, "LHU", "Loharu Jn", true, 0.0, 0.0,
+                "2026-09-09T14:50:00Z", "2026-09-09T14:53:00Z",
+                "2026-09-09T15:23:14Z", "2026-09-09T15:22:23Z",
+                90, 89, "departed", 1615.3, 88.2, "3");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12259", dataWithRoute(List.of(departedButActuallyFuture)));
+
+        assertThat(observations).isEmpty();
+        assertThat(metrics.observationsReceived()).isEqualTo(1);
+        assertThat(metrics.observationsRejected()).isEqualTo(1);
+    }
+
+    @Test
+    void aDepartedStopWhoseActualDepartureIsStillInTheFutureRelativeToObservedAtIsNotEligible() {
+        // Same invariant, the actualDeparture field independently - a stop could carry a
+        // legitimate past actualArrival but a still-projected actualDeparture (e.g. a halt the
+        // train has reached but not yet left).
+        RouteStop departureStillFuture = new RouteStop(287, "LHU", "Loharu Jn", true, 0.0, 0.0,
+                "2026-09-09T14:50:00Z", "2026-09-09T14:53:00Z",
+                "2026-09-09T14:59:00Z", "2026-09-09T15:22:23Z",
+                9, 89, "departed", 1615.3, 88.2, "3");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12259", dataWithRoute(List.of(departureStillFuture)));
+
+        assertThat(observations).isEmpty();
+    }
+
+    @Test
+    void aLegitimatePastActualArrivalRemainsEligible() {
+        RouteStop genuinelyPast = new RouteStop(287, "LHU", "Loharu Jn", true, 0.0, 0.0,
+                "2026-09-09T14:50:00Z", "2026-09-09T14:53:00Z",
+                "2026-09-09T14:59:38Z", "2026-09-09T14:59:59Z",
+                9, 6, "departed", 1615.3, 88.2, "3");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12259", dataWithRoute(List.of(genuinelyPast)));
+
+        assertThat(observations).hasSize(1);
+    }
+
+    @Test
+    void anActualArrivalExactlyEqualToObservedAtIsToleratedNotRejected() {
+        // Boundary case: strictly-after is rejected, but "at the same instant" is a legitimate
+        // near-instantaneous edge case, not treated as impossible.
+        RouteStop exactlyNow = new RouteStop(287, "LHU", "Loharu Jn", true, 0.0, 0.0,
+                "2026-09-09T14:50:00Z", "2026-09-09T14:53:00Z",
+                "2026-09-09T15:00:00Z", null,
+                10, null, "departed", 1615.3, 88.2, "3");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12259", dataWithRoute(List.of(exactlyNow)));
+
+        assertThat(observations).hasSize(1);
+    }
+
+    @Test
+    void anUnparseableActualArrivalFormatIsNotRejectedByTheFutureEventCheck() {
+        // The opaque-string limitation is unchanged: a value that isn't a confirmed ISO-8601
+        // offset date-time (e.g. the short "HH:mm" shape used elsewhere in these tests) is simply
+        // not checked by this invariant, never rejected because it failed to parse.
+        RouteStop shortTimeFormat = stop("BBL", 76, "11:13");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12952", dataWithRoute(List.of(shortTimeFormat)));
+
+        assertThat(observations).hasSize(1);
+    }
+
     // --- Phase 16E: station ordering ---
 
     @Test

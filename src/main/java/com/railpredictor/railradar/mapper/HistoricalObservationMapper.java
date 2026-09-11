@@ -10,7 +10,9 @@ import com.railpredictor.railradar.dto.RouteStop;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZonedDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
@@ -114,7 +116,7 @@ public class HistoricalObservationMapper {
                 continue;
             }
             metrics.observationReceived();
-            String rejectionReason = rejectionReason(stop);
+            String rejectionReason = rejectionReason(stop, observedAt);
             if (rejectionReason != null) {
                 metrics.observationRejected();
                 log.debug(
@@ -163,8 +165,23 @@ public class HistoricalObservationMapper {
      * docs/historical-data-design.md's Phase 22D notes for the full finding and its residual risk
      * (an as-yet-unobserved RailRadar status string with the same "not yet happened" meaning would
      * not be caught by this check).
+     *
+     * <p><b>Phase 23A finding:</b> the {@code status} check above is necessary but still not
+     * sufficient - a real response for train 12259 showed a stop marked {@code status: "departed"}
+     * (not {@code "upcoming"}) whose {@code actualArrival} was nonetheless still ~15 minutes in the
+     * future relative to when the response was fetched (RailRadar had apparently already committed
+     * to a projected/estimated arrival for a fast-approaching stop before the train had genuinely
+     * reached it). No additional status string was involved - a second, orthogonal, always-on
+     * invariant is needed: {@code actualArrival}/{@code actualDeparture}, whenever they parse as a
+     * real ISO-8601 offset date-time (the only format ever confirmed against a real response - see
+     * class Javadoc), can never legitimately be after {@code observedAt} (the instant this
+     * application fetched/recorded the response) - a genuine past event cannot occur after the
+     * moment it was observed, regardless of what status string accompanies it. A value that fails
+     * to parse as that format is left unchecked here (opaque-string limitation, unchanged) rather
+     * than rejected, so this can never regress a caller supplying some other, still-unconfirmed
+     * timestamp shape.
      */
-    private String rejectionReason(RouteStop stop) {
+    private String rejectionReason(RouteStop stop, Instant observedAt) {
         if (stop.stationCode() == null || stop.stationCode().isBlank()) {
             return "missing station code";
         }
@@ -177,6 +194,39 @@ public class HistoricalObservationMapper {
         }
         if (isImplausible(stop.delayArrival()) || isImplausible(stop.delayDeparture())) {
             return "implausible delay value beyond " + validationProperties.maxPlausibleDelayMinutes() + " minutes";
+        }
+        String futureActualArrivalReason = futureActualEventReason("actualArrival", stop.actualArrival(), observedAt);
+        if (futureActualArrivalReason != null) {
+            return futureActualArrivalReason;
+        }
+        String futureActualDepartureReason =
+                futureActualEventReason("actualDeparture", stop.actualDeparture(), observedAt);
+        if (futureActualDepartureReason != null) {
+            return futureActualDepartureReason;
+        }
+        return null;
+    }
+
+    /**
+     * @return a rejection reason when {@code rawTimestamp} parses as a real ISO-8601 offset
+     *         date-time strictly after {@code observedAt}; {@code null} when it is null, does not
+     *         parse in that format (opaque-string limitation - never rejected on that basis alone),
+     *         or is at/before {@code observedAt} (exactly equal is deliberately tolerated as a
+     *         legitimate near-instantaneous boundary case, not treated as impossible).
+     */
+    private static String futureActualEventReason(String fieldName, String rawTimestamp, Instant observedAt) {
+        if (rawTimestamp == null) {
+            return null;
+        }
+        Instant parsed;
+        try {
+            parsed = OffsetDateTime.parse(rawTimestamp).toInstant();
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+        if (parsed.isAfter(observedAt)) {
+            return fieldName + " (" + rawTimestamp + ") is after observedAt (" + observedAt + ") - a genuine "
+                    + "past event cannot occur after the moment this application observed it";
         }
         return null;
     }
