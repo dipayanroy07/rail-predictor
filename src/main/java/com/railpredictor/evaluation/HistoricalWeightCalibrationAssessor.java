@@ -12,23 +12,32 @@ import org.springframework.stereotype.Component;
 
 /**
  * Attempts to empirically calibrate {@code prediction.historical-adjustment.weight} (Phase 20,
- * spec item 7) against real evaluated outcomes.
+ * spec item 7; corrected in Phase 21) against real evaluated outcomes.
  *
- * <p><b>Why this always reports {@code METRIC_STRUCTURALLY_UNAFFECTED}, regardless of sample
- * size:</b> {@code PredictionSnapshot.predictedNextStationDelayMinutes} - the only quantity this
- * codebase evaluates for accuracy - is computed purely as {@code currentDelayMinutes +
- * predictedExtraDelayMinutes} (see {@code PredictionEngine}/{@code PredictionSnapshotRecorder}).
- * {@code historicalAdjustmentMinutes} only ever feeds the separate, destination-scoped
- * {@code predictedTotalDelayMinutes}, which no evaluation in this codebase compares against an
- * actual outcome. Changing {@code prediction.historical-adjustment.weight} therefore cannot move
- * the evaluated error by construction - no amount of real data changes this conclusion, so this is
- * reported as a structural blocker, not an {@code INSUFFICIENT_SAMPLE_SIZE} data problem (which
- * would incorrectly imply that collecting more snapshots could eventually unblock calibration).
+ * <p><b>Phase 21 correction:</b> before this phase, {@code PredictionSnapshot.
+ * predictedNextStationDelayMinutes} - the only quantity this codebase evaluates for accuracy - was
+ * computed purely as {@code currentDelayMinutes + predictedExtraDelayMinutes}, so no historical
+ * signal could ever move the evaluated error; this assessor always reported
+ * {@code CalibrationBlockerReason.METRIC_STRUCTURALLY_UNAFFECTED}. Phase 21 added
+ * {@code nextStationHistoricalAdjustmentMinutes} - a properly next-station-scoped historical
+ * signal (the immediate next section's own historical delay-change, or the equally next-station-
+ * scoped station-level fallback - never the whole-remaining-route sum {@code
+ * historicalAdjustmentMinutes} uses) - which now genuinely contributes to
+ * {@code predictedNextStationDelayMinutes}, using the exact same {@code
+ * prediction.historical-adjustment.weight} this assessor is evaluating. The metric is therefore no
+ * longer structurally blocked: this assessor now reports {@code INSUFFICIENT_SAMPLE_SIZE} (or
+ * {@code MOCK_DATA_ONLY}) instead, whenever real data is insufficient - never
+ * {@code METRIC_STRUCTURALLY_UNAFFECTED} again for this parameter.
  *
- * <p>The chronological train/validation split ({@link ChronologicalSplitter}) is still performed
- * and its sample counts still reported, purely so this assessment is transparent about how much
- * real, point-in-time-ordered evidence exists - not because the split result changes the
- * conclusion.
+ * <p><b>This phase still does not implement an actual weight-search/selection algorithm</b> - even
+ * once {@code evaluatedSnapshots.size()} meets {@code evaluation.calibration.minimum-sample-count},
+ * this assessor reports {@code INSUFFICIENT_DATA} rather than fabricating a
+ * {@code PROVISIONALLY_CALIBRATED}/{@code VALIDATED} result no real search has actually produced -
+ * building that search is explicitly left to a future phase (see docs/prediction-model.md's Phase
+ * 21 notes and this codebase's own "do not calibrate anything unless a real algorithm selected and
+ * validated a candidate" rule). The chronological train/validation split
+ * ({@link ChronologicalSplitter}) is still performed and its sample counts still reported, so this
+ * assessment is transparent about how much real, point-in-time-ordered evidence already exists.
  */
 @Component
 public class HistoricalWeightCalibrationAssessor {
@@ -52,26 +61,36 @@ public class HistoricalWeightCalibrationAssessor {
     public CalibrationAssessment assess(List<PredictionSnapshot> evaluatedSnapshots) {
         Objects.requireNonNull(evaluatedSnapshots, "evaluatedSnapshots");
 
-        String explanation = "predictedNextStationDelayMinutes (the only quantity this codebase evaluates) is "
-                + "computed as currentDelayMinutes + predictedExtraDelayMinutes only - historicalAdjustmentMinutes "
-                + "never contributes to it, only to the separate, unevaluated predictedTotalDelayMinutes. "
-                + "Calibrating prediction.historical-adjustment.weight against the evaluated metric is therefore "
-                + "structurally impossible with the current evaluation scope, regardless of sample size.";
+        int realSampleCount = evaluatedSnapshots.size();
+        int minimumSampleCount = calibrationProperties.minimumSampleCount();
 
-        if (evaluatedSnapshots.size() < 2) {
+        if (realSampleCount < minimumSampleCount) {
+            String explanation = "Only " + realSampleCount + " real evaluated snapshot(s) exist - "
+                    + "evaluation.calibration.minimum-sample-count=" + minimumSampleCount
+                    + " requires more before a chronological train/validation split is even attempted. "
+                    + "nextStationHistoricalAdjustmentMinutes now genuinely contributes to the evaluated "
+                    + "predictedNextStationDelayMinutes (Phase 21) - this is a real data-volume gap, not a "
+                    + "structural one.";
             return CalibrationAssessment.blocked(
-                    PARAMETER_NAME, CalibrationBlockerReason.METRIC_STRUCTURALLY_UNAFFECTED, explanation,
-                    evaluatedSnapshots.size());
+                    PARAMETER_NAME, CalibrationBlockerReason.INSUFFICIENT_SAMPLE_SIZE, explanation, realSampleCount);
         }
 
         ChronologicalSplitter.Split split = splitter.split(evaluatedSnapshots, calibrationProperties.validationSplit());
 
+        String explanation = "Enough real evaluated snapshots exist to perform a chronological "
+                + "train/validation split (" + split.training().size() + " training / "
+                + split.validation().size() + " validation), and nextStationHistoricalAdjustmentMinutes "
+                + "now genuinely contributes to the evaluated predictedNextStationDelayMinutes (Phase 21) - "
+                + "but this codebase does not yet implement a candidate-weight search/selection algorithm. "
+                + "Reporting INSUFFICIENT_DATA rather than fabricating a validated coefficient no real "
+                + "search has produced; building that search is the recommended next phase.";
+
         return new CalibrationAssessment(
                 PARAMETER_NAME,
                 CalibrationStatus.INSUFFICIENT_DATA,
-                CalibrationBlockerReason.METRIC_STRUCTURALLY_UNAFFECTED,
+                CalibrationBlockerReason.INSUFFICIENT_SAMPLE_SIZE,
                 explanation,
-                evaluatedSnapshots.size(),
+                realSampleCount,
                 split.training().size(),
                 split.validation().size(),
                 historicalAdjustmentProperties.weight(),

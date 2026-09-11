@@ -10,6 +10,7 @@ import com.railpredictor.model.domain.HistoricalAdjustmentSource;
 import com.railpredictor.model.domain.PredictionEvaluationMode;
 import com.railpredictor.model.domain.PredictionEvaluationStatus;
 import com.railpredictor.model.domain.PredictionSnapshot;
+import com.railpredictor.repository.HistoricalObservationRepository;
 import com.railpredictor.repository.PredictionSnapshotEntity;
 import com.railpredictor.repository.PredictionSnapshotEntityMapper;
 import com.railpredictor.repository.PredictionSnapshotRepository;
@@ -22,11 +23,13 @@ class DataQualityAssessorTest {
 
     @Test
     void noRepositoryConfiguredYieldsEmptyReportWithExplicitNote() {
-        DataQualityAssessor assessor = new DataQualityAssessor(Optional.empty(), mock(PredictionSnapshotEntityMapper.class));
+        DataQualityAssessor assessor = new DataQualityAssessor(
+                Optional.empty(), Optional.empty(), mock(PredictionSnapshotEntityMapper.class));
 
         DataQualityReport report = assessor.assess();
 
         assertThat(report.totalSnapshots()).isZero();
+        assertThat(report.historicalObservationCount()).isZero();
         assertThat(report.pointInTimeReproducibilityNote()).containsIgnoringCase("no snapshot database");
     }
 
@@ -34,12 +37,47 @@ class DataQualityAssessorTest {
     void repositoryConfiguredButEmptyYieldsEmptyReportWithADifferentNote() {
         PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
         when(repository.findAll()).thenReturn(List.of());
-        DataQualityAssessor assessor = new DataQualityAssessor(Optional.of(repository), mock(PredictionSnapshotEntityMapper.class));
+        HistoricalObservationRepository observationRepository = mock(HistoricalObservationRepository.class);
+        when(observationRepository.count()).thenReturn(0L);
+        DataQualityAssessor assessor = new DataQualityAssessor(
+                Optional.of(repository), Optional.of(observationRepository), mock(PredictionSnapshotEntityMapper.class));
 
         DataQualityReport report = assessor.assess();
 
         assertThat(report.totalSnapshots()).isZero();
+        assertThat(report.historicalObservationCount()).isZero();
         assertThat(report.pointInTimeReproducibilityNote()).containsIgnoringCase("zero snapshots");
+    }
+
+    @Test
+    void observationsExistButNoSnapshotsYieldsADistinctStateCNote() {
+        // Phase 22 state C: real historical observations are being collected, but no prediction
+        // snapshots exist yet - must never be reported identically to "nothing exists at all".
+        PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
+        when(repository.findAll()).thenReturn(List.of());
+        HistoricalObservationRepository observationRepository = mock(HistoricalObservationRepository.class);
+        when(observationRepository.count()).thenReturn(42L);
+        DataQualityAssessor assessor = new DataQualityAssessor(
+                Optional.of(repository), Optional.of(observationRepository), mock(PredictionSnapshotEntityMapper.class));
+
+        DataQualityReport report = assessor.assess();
+
+        assertThat(report.totalSnapshots()).isZero();
+        assertThat(report.historicalObservationCount()).isEqualTo(42);
+        assertThat(report.pointInTimeReproducibilityNote()).containsIgnoringCase("42 real historical");
+        assertThat(report.pointInTimeReproducibilityNote()).doesNotContainIgnoringCase("zero snapshots (and zero");
+    }
+
+    @Test
+    void noObservationRepositoryConfiguredIsTreatedAsZeroObservationsNotAFailure() {
+        PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
+        when(repository.findAll()).thenReturn(List.of());
+        DataQualityAssessor assessor = new DataQualityAssessor(
+                Optional.of(repository), Optional.empty(), mock(PredictionSnapshotEntityMapper.class));
+
+        DataQualityReport report = assessor.assess();
+
+        assertThat(report.historicalObservationCount()).isZero();
     }
 
     @Test
@@ -65,7 +103,7 @@ class DataQualityAssessorTest {
         when(mapper.toDomain(entity2)).thenReturn(approximateNoWeatherNoDisruption);
         when(mapper.toDomain(entity3)).thenReturn(pending);
 
-        DataQualityAssessor assessor = new DataQualityAssessor(Optional.of(repository), mapper);
+        DataQualityAssessor assessor = new DataQualityAssessor(Optional.of(repository), Optional.empty(), mapper);
 
         DataQualityReport report = assessor.assess();
 
@@ -90,6 +128,9 @@ class DataQualityAssessorTest {
                 5, predicted, 10, Instant.parse("2026-09-09T12:00:00Z"),
                 3, historicalSource, DataProvenance.RAILRADAR,
                 75.0, status, actual, predicted - actual, Instant.parse("2026-09-09T11:00:00Z"),
-                PredictionEvaluationMode.LIVE_EVALUATION, weatherProvenance, disruptionImpactMinutes);
+                PredictionEvaluationMode.LIVE_EVALUATION, weatherProvenance, disruptionImpactMinutes,
+                historicalSource == HistoricalAdjustmentSource.NONE ? 0 : 2,
+                historicalSource, DataProvenance.RAILRADAR,
+                predicted - 5);
     }
 }

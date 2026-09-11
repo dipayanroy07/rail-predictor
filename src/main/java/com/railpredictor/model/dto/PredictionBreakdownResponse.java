@@ -20,6 +20,12 @@ import java.time.Instant;
  * {@code "mixed(...)"} combination) - a genuinely separate axis from {@code source}, never
  * conflated with it (a {@code SECTION} adjustment can be mock-sourced exactly as easily as a
  * {@code STATION_FALLBACK} one).
+ *
+ * <p>{@code predictedNextStationDelayMinutes} (Phase 21) is the separate, next-station-scoped
+ * prediction - the one actually evaluated for accuracy (see {@code PredictionSnapshot}) - never to
+ * be confused with {@code predictedTotalDelayMinutes}/{@code predictedEta}, which remain
+ * destination-scoped. Both legitimately reuse the same disruption-impact contribution; only the
+ * historical term differs in scope between them (see docs/prediction-model.md's Phase 21 notes).
  */
 public record PredictionBreakdownResponse(
         double baseTravelTimeMinutes,
@@ -30,5 +36,25 @@ public record PredictionBreakdownResponse(
         String historicalAdjustmentProvenance,
         int recoveryMinutes,
         int predictedTotalDelayMinutes,
-        Instant predictedEta) {
+        Instant predictedEta,
+        int predictedNextStationDelayMinutes) {
+
+    /** Pre-Phase-21 shape, preserved so existing callers/tests need not change: defaults
+     * {@code predictedNextStationDelayMinutes} to {@code currentDelayMinutes +
+     * predictedExtraDelayMinutes} - correct for any caller not concerned with the next-station-
+     * scoped historical/disruption contribution. */
+    public PredictionBreakdownResponse(
+            double baseTravelTimeMinutes,
+            int currentDelayMinutes,
+            int predictedExtraDelayMinutes,
+            int historicalAdjustmentMinutes,
+            HistoricalAdjustmentSource historicalAdjustmentSource,
+            String historicalAdjustmentProvenance,
+            int recoveryMinutes,
+            int predictedTotalDelayMinutes,
+            Instant predictedEta) {
+        this(baseTravelTimeMinutes, currentDelayMinutes, predictedExtraDelayMinutes, historicalAdjustmentMinutes,
+                historicalAdjustmentSource, historicalAdjustmentProvenance, recoveryMinutes, predictedTotalDelayMinutes,
+                predictedEta, currentDelayMinutes + predictedExtraDelayMinutes);
+    }
 }

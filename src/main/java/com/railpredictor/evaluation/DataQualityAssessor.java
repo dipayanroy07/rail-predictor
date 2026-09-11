@@ -4,6 +4,7 @@ import com.railpredictor.model.domain.DataQualityReport;
 import com.railpredictor.model.domain.HistoricalAdjustmentSource;
 import com.railpredictor.model.domain.PredictionEvaluationStatus;
 import com.railpredictor.model.domain.PredictionSnapshot;
+import com.railpredictor.repository.HistoricalObservationRepository;
 import com.railpredictor.repository.PredictionSnapshotEntity;
 import com.railpredictor.repository.PredictionSnapshotEntityMapper;
 import com.railpredictor.repository.PredictionSnapshotRepository;
@@ -16,6 +17,12 @@ import org.springframework.stereotype.Component;
  * actually exist (Phase 20) - the first thing to check before trusting any accuracy number. Every
  * count is a genuine database count; nothing here is estimated, padded, or backed by mock/test
  * data.
+ *
+ * <p>Phase 22 additionally counts the entirely separate {@code historical_observations} table, so
+ * "no snapshot database configured" (state A), "database configured, genuinely nothing recorded
+ * anywhere" (state B), and "real observations are being collected but no prediction snapshots
+ * exist yet" (state C - e.g. live requests aren't being made, or {@code
+ * prediction.evaluation.enabled=false}) are never collapsed into the same report.
  */
 @Component
 public class DataQualityAssessor {
@@ -31,10 +38,15 @@ public class DataQualityAssessor {
                     + "already-recorded weatherProvenance/disruptionImpactMinutes can be observed as-is.";
 
     private final Optional<PredictionSnapshotRepository> repository;
+    private final Optional<HistoricalObservationRepository> observationRepository;
     private final PredictionSnapshotEntityMapper entityMapper;
 
-    public DataQualityAssessor(Optional<PredictionSnapshotRepository> repository, PredictionSnapshotEntityMapper entityMapper) {
+    public DataQualityAssessor(
+            Optional<PredictionSnapshotRepository> repository,
+            Optional<HistoricalObservationRepository> observationRepository,
+            PredictionSnapshotEntityMapper entityMapper) {
         this.repository = repository;
+        this.observationRepository = observationRepository;
         this.entityMapper = entityMapper;
     }
 
@@ -44,11 +56,21 @@ public class DataQualityAssessor {
                     + "Spring profile and enable prediction.evaluation to accumulate real evaluation data.");
         }
 
+        long observationCount = observationRepository.map(HistoricalObservationRepository::count).orElse(0L);
+
         List<PredictionSnapshotEntity> entities = repository.get().findAll();
         if (entities.isEmpty()) {
-            return DataQualityReport.empty("A snapshot database is configured, but zero snapshots have been "
-                    + "recorded yet - enable prediction.evaluation.enabled and run live predictions to "
-                    + "accumulate real evaluation data.");
+            String note = observationCount > 0
+                    ? "A snapshot database is configured, and " + observationCount + " real historical "
+                            + "observation(s) have been collected, but zero prediction snapshots exist yet - "
+                            + "enable prediction.evaluation.enabled and make live prediction requests to start "
+                            + "accumulating evaluation snapshots (observation collection and snapshot recording "
+                            + "are independent: observations are recorded from every live RailRadar response "
+                            + "regardless of prediction.evaluation.enabled, but snapshots require it explicitly)."
+                    : "A snapshot database is configured, but zero snapshots (and zero historical observations) "
+                            + "have been recorded yet - enable prediction.evaluation.enabled and run live "
+                            + "predictions to accumulate real evaluation data.";
+            return DataQualityReport.empty(note, (int) observationCount);
         }
 
         List<PredictionSnapshot> snapshots = entities.stream().map(entityMapper::toDomain).toList();
@@ -64,11 +86,17 @@ public class DataQualityAssessor {
                 .toList();
 
         int weatherAvailable = (int) evaluated.stream().filter(s -> s.weatherProvenance() != null).count();
+        // Phase 21: historicalAvailable now reflects nextStationHistoricalAdjustmentSource - the
+        // field that genuinely enters predictedNextStationDelayMinutes - never the destination-
+        // scoped historicalAdjustmentSource, which does not.
         int historicalAvailable = (int) evaluated.stream()
-                .filter(s -> s.historicalAdjustmentSource() != HistoricalAdjustmentSource.NONE).count();
+                .filter(s -> s.nextStationHistoricalAdjustmentSource() != HistoricalAdjustmentSource.NONE).count();
         int disruptionAvailable = (int) evaluated.stream().filter(s -> s.disruptionImpactMinutes() != null).count();
-        int simulationContributed = (int) evaluated.stream()
-                .filter(s -> (s.predictedNextStationDelayMinutes() - s.currentDelayMinutes()) > 0).count();
+        // Phase 21: predictedExtraDelayMinutes is simulation's own persisted raw contribution -
+        // never predictedNextStationDelayMinutes - currentDelayMinutes, which (since this phase)
+        // also includes the next-station historical adjustment and disruption impact and would
+        // misattribute their contribution to simulation.
+        int simulationContributed = (int) evaluated.stream().filter(s -> s.predictedExtraDelayMinutes() > 0).count();
 
         int distinctTrains = (int) snapshots.stream().map(PredictionSnapshot::trainNumber).distinct().count();
         int distinctStations = (int) snapshots.stream().map(PredictionSnapshot::targetStationCode).distinct().count();
@@ -79,7 +107,7 @@ public class DataQualityAssessor {
         return new DataQualityReport(
                 snapshots.size(), exact + approximate, exact, approximate, pending, notEvaluable,
                 weatherAvailable, historicalAvailable, disruptionAvailable, simulationContributed,
-                distinctTrains, distinctStations, earliest, latest, POINT_IN_TIME_NOTE);
+                distinctTrains, distinctStations, earliest, latest, POINT_IN_TIME_NOTE, (int) observationCount);
     }
 
     private static int countByStatus(List<PredictionSnapshot> snapshots, PredictionEvaluationStatus status) {

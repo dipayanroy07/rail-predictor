@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
         HistoricalObservationValidationProperties.class,
         HistoricalJourneyDateProperties.class,
         HistoricalSectionProperties.class,
-        HistoricalSectionMockProperties.class})
+        HistoricalSectionMockProperties.class,
+        HistoricalCollectionProperties.class})
 public class HistoricalConfig {
 }

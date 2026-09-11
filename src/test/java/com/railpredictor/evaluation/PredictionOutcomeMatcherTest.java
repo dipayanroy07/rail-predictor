@@ -216,4 +216,32 @@ class PredictionOutcomeMatcherTest {
         assertThat(result.evaluationStatus()).isEqualTo(PredictionEvaluationStatus.EVALUATED_EXACT);
         assertThat(result.disruptionImpactMinutes()).isEqualTo(20);
     }
+
+    @Test
+    void phase21NextStationFieldsAreCarriedThroughUnchangedNeverResetOrMisderived() {
+        // Regression test for a real Phase 22 audit finding: this matcher previously reconstructed
+        // the evaluated snapshot via the pre-Phase-21 constructor, which reset
+        // nextStationHistoricalAdjustmentMinutes/Source/Provenance to 0/NONE/UNAVAILABLE and
+        // mis-derived predictedExtraDelayMinutes as predictedNextStationDelayMinutes -
+        // currentDelayMinutes (double-counting the next-station historical/disruption
+        // contribution into "simulation") - corrupting the Phase 21 audit trail the instant a
+        // snapshot was evaluated.
+        PredictionSnapshot snapshot = new PredictionSnapshot(
+                1L, "12952", PREDICTION_MADE_AT, "KOTA",
+                5, 20, 10, Instant.parse("2026-09-09T12:00:00Z"),
+                3, HistoricalAdjustmentSource.STATION_FALLBACK, DataProvenance.RAILRADAR,
+                75.0, PredictionEvaluationStatus.PENDING, null, null, null,
+                com.railpredictor.model.domain.PredictionEvaluationMode.LIVE_EVALUATION,
+                DataProvenance.OPENMETEO, 5,
+                7, HistoricalAdjustmentSource.SECTION, DataProvenance.RAILRADAR, 8);
+        HistoricalObservation match = observation("12952", "KOTA", 6, Instant.parse("2026-09-09T11:00:00Z"));
+
+        PredictionSnapshot result = matcher.evaluate(snapshot, List.of(match));
+
+        assertThat(result.evaluationStatus()).isEqualTo(PredictionEvaluationStatus.EVALUATED_EXACT);
+        assertThat(result.nextStationHistoricalAdjustmentMinutes()).isEqualTo(7);
+        assertThat(result.nextStationHistoricalAdjustmentSource()).isEqualTo(HistoricalAdjustmentSource.SECTION);
+        assertThat(result.nextStationHistoricalAdjustmentProvenance()).isEqualTo(DataProvenance.RAILRADAR);
+        assertThat(result.predictedExtraDelayMinutes()).isEqualTo(8);
+    }
 }

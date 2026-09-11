@@ -1,5 +1,6 @@
 package com.railpredictor.evaluation;
 
+import com.railpredictor.config.EvaluationCalibrationProperties;
 import com.railpredictor.model.domain.CalibrationAssessment;
 import com.railpredictor.model.domain.CalibrationBlockerReason;
 import com.railpredictor.model.domain.PredictionSnapshot;
@@ -9,22 +10,27 @@ import org.springframework.stereotype.Component;
 
 /**
  * Attempts to empirically calibrate the Phase 19 {@code HeuristicDisruptionImpactPolicy}'s default
- * per-type delay minutes (spec item 9) against real evaluated outcomes.
+ * per-type delay minutes (spec item 9; corrected in Phase 21) against real evaluated outcomes.
  *
- * <p><b>Why this always reports {@code METRIC_STRUCTURALLY_UNAFFECTED}:</b> exactly the same
- * reason as {@link HistoricalWeightCalibrationAssessor} - {@code disruptionImpactMinutes} only
- * ever feeds the separate, unevaluated {@code predictedTotalDelayMinutes}, never the evaluated
- * {@code predictedNextStationDelayMinutes}. No amount of real disruption data can change this
- * conclusion under the current evaluation scope.
+ * <p><b>Phase 21 correction:</b> {@code disruptionImpactMinutes} was <em>already</em> correctly
+ * next-section-scoped before this phase - {@code DisruptionImpactAggregator} is only ever given the
+ * train's current section (current station → next station), never the whole remaining route (see
+ * {@code PredictionService}). The reason this assessor previously reported
+ * {@code METRIC_STRUCTURALLY_UNAFFECTED} was purely a wiring gap: {@code
+ * PredictionSnapshot.predictedNextStationDelayMinutes} never included {@code
+ * disruptionImpactMinutes} at all before Phase 21 added it to {@code PredictionEngine}'s
+ * next-station formula. Now that the wiring is fixed, this parameter is no longer structurally
+ * blocked - this assessor reports {@code INSUFFICIENT_SAMPLE_SIZE} instead, whenever real data is
+ * insufficient.
  *
- * <p>A second, independent limitation, documented here rather than acted on (since the structural
- * blocker already applies regardless): {@link PredictionSnapshot} persists no field distinguishing
- * whether an active disruption came from the real RailRadar-backed provider or
- * {@code MockRailwayDisruptionProvider} - so even if the metric were unblocked in a future phase,
- * this codebase could not yet mechanically exclude mock disruption data from a calibration
- * attempt (spec item 9's "mock disruptions must never be treated as empirical calibration
- * evidence" requirement). That gap would need to be closed before this assessor could ever
- * progress beyond {@code INSUFFICIENT_DATA}.
+ * <p><b>An independent limitation remains, unresolved by Phase 21</b>: {@link PredictionSnapshot}
+ * still persists no field distinguishing whether an active disruption came from the real
+ * RailRadar-backed provider or {@code MockRailwayDisruptionProvider} (spec item 9's "mock
+ * disruptions must never be treated as empirical calibration evidence" requirement). Until that
+ * gap is closed, this assessor cannot mechanically guarantee mock-data exclusion even once enough
+ * samples exist - so it remains conservative (never claims {@code PROVISIONALLY_CALIBRATED}/
+ * {@code VALIDATED}) regardless of sample count, and this gap is called out explicitly rather than
+ * silently assumed away.
  */
 @Component
 public class DisruptionImpactCalibrationAssessor {
@@ -32,26 +38,43 @@ public class DisruptionImpactCalibrationAssessor {
     private static final String PARAMETER_NAME =
             "railway-disruption-impact.* (HeuristicDisruptionImpactPolicy's per-type default delay minutes)";
 
+    private final EvaluationCalibrationProperties calibrationProperties;
+
+    public DisruptionImpactCalibrationAssessor(EvaluationCalibrationProperties calibrationProperties) {
+        this.calibrationProperties = calibrationProperties;
+    }
+
     /** @param evaluatedSnapshots already-evaluated (EXACT/APPROXIMATE) snapshots only. */
     public CalibrationAssessment assess(List<PredictionSnapshot> evaluatedSnapshots) {
         Objects.requireNonNull(evaluatedSnapshots, "evaluatedSnapshots");
 
+        int realSampleCount = evaluatedSnapshots.size();
         int withDisruptionImpact = (int) evaluatedSnapshots.stream()
                 .filter(s -> s.disruptionImpactMinutes() != null)
                 .count();
+        int minimumSampleCount = calibrationProperties.minimumSampleCount();
 
-        String explanation = "predictedNextStationDelayMinutes (the only quantity this codebase evaluates) is "
-                + "computed as currentDelayMinutes + predictedExtraDelayMinutes only - disruptionImpactMinutes "
-                + "never contributes to it, only to the separate, unevaluated predictedTotalDelayMinutes. "
-                + "Calibrating any railway-disruption-impact.* default against the evaluated metric is therefore "
-                + "structurally impossible with the current evaluation scope, regardless of how many of the "
-                + evaluatedSnapshots.size() + " evaluated snapshots (" + withDisruptionImpact
-                + " with a recorded disruption impact) exist. A second, independent gap: no field on "
-                + "PredictionSnapshot distinguishes real from mock disruption provenance, so mock-data exclusion "
-                + "could not yet be enforced even if the metric were unblocked in a future phase.";
+        if (realSampleCount < minimumSampleCount) {
+            String explanation = "Only " + realSampleCount + " real evaluated snapshot(s) exist ("
+                    + withDisruptionImpact + " with a recorded disruption impact) - "
+                    + "evaluation.calibration.minimum-sample-count=" + minimumSampleCount + " requires more. "
+                    + "disruptionImpactMinutes now genuinely contributes to the evaluated "
+                    + "predictedNextStationDelayMinutes (Phase 21) - this is a real data-volume gap, not a "
+                    + "structural one. A separate, unresolved gap: no field on PredictionSnapshot distinguishes "
+                    + "real from mock disruption provenance, so mock-data exclusion could not yet be "
+                    + "mechanically enforced even once enough samples exist.";
+            return CalibrationAssessment.blocked(
+                    PARAMETER_NAME, CalibrationBlockerReason.INSUFFICIENT_SAMPLE_SIZE, explanation, realSampleCount);
+        }
 
+        String explanation = "Enough real evaluated snapshots exist (" + realSampleCount + ", "
+                + withDisruptionImpact + " with a recorded disruption impact), and disruptionImpactMinutes now "
+                + "genuinely contributes to the evaluated predictedNextStationDelayMinutes (Phase 21) - but "
+                + "PredictionSnapshot still has no field distinguishing real from mock disruption provenance, "
+                + "so mock-data exclusion cannot yet be mechanically guaranteed. Reporting INSUFFICIENT_DATA "
+                + "rather than risk treating mock-sourced disruption impact as empirical evidence; closing this "
+                + "provenance gap is the recommended next step before any real candidate search is attempted.";
         return CalibrationAssessment.blocked(
-                PARAMETER_NAME, CalibrationBlockerReason.METRIC_STRUCTURALLY_UNAFFECTED, explanation,
-                evaluatedSnapshots.size());
+                PARAMETER_NAME, CalibrationBlockerReason.MOCK_DATA_ONLY, explanation, realSampleCount);
     }
 }

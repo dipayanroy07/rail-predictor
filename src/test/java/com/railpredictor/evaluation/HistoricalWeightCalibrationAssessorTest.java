@@ -32,7 +32,11 @@ class HistoricalWeightCalibrationAssessorTest {
     }
 
     @Test
-    void alwaysReportsStructurallyUnaffectedRegardlessOfSampleSize() {
+    void reportsInsufficientSampleSizeNeverStructurallyUnaffectedOnceEnoughRealDataExists() {
+        // Phase 21: historical adjustment now genuinely enters the evaluated metric, so a
+        // sufficient sample must never be reported as structurally blocked - only as "no real
+        // candidate-search algorithm exists yet" (still INSUFFICIENT_DATA, but for a data/algorithm
+        // reason, never METRIC_STRUCTURALLY_UNAFFECTED).
         List<PredictionSnapshot> snapshots = IntStream.range(0, 100)
                 .mapToObj(i -> evaluated(Instant.parse("2026-09-01T00:00:00Z").plusSeconds(i * 3600L)))
                 .toList();
@@ -40,9 +44,19 @@ class HistoricalWeightCalibrationAssessorTest {
         CalibrationAssessment assessment = assessor.assess(snapshots);
 
         assertThat(assessment.status()).isEqualTo(CalibrationStatus.INSUFFICIENT_DATA);
-        assertThat(assessment.blockerReason()).isEqualTo(CalibrationBlockerReason.METRIC_STRUCTURALLY_UNAFFECTED);
+        assertThat(assessment.blockerReason()).isEqualTo(CalibrationBlockerReason.INSUFFICIENT_SAMPLE_SIZE);
         assertThat(assessment.selectedCandidateValue()).isNull();
         assertThat(assessment.validationImprovementPercent()).isNull();
+    }
+
+    @Test
+    void reportsInsufficientSampleSizeBelowConfiguredMinimum() {
+        List<PredictionSnapshot> snapshots = List.of(evaluated(Instant.parse("2026-09-01T00:00:00Z")));
+
+        CalibrationAssessment assessment = assessor.assess(snapshots);
+
+        assertThat(assessment.status()).isEqualTo(CalibrationStatus.INSUFFICIENT_DATA);
+        assertThat(assessment.blockerReason()).isEqualTo(CalibrationBlockerReason.INSUFFICIENT_SAMPLE_SIZE);
     }
 
     @Test
@@ -58,12 +72,16 @@ class HistoricalWeightCalibrationAssessorTest {
     }
 
     @Test
-    void reportsRealTrainingAndValidationSampleCountsForTransparency() {
+    void reportsRealTrainingAndValidationSampleCountsForTransparencyOnceSampleSizeIsMet() {
+        HistoricalWeightCalibrationAssessor lowThresholdAssessor = new HistoricalWeightCalibrationAssessor(
+                new ChronologicalSplitter(),
+                new HistoricalAdjustmentProperties(0.3, 5),
+                new EvaluationCalibrationProperties(true, 5, 0.3, 5.0));
         List<PredictionSnapshot> snapshots = IntStream.range(0, 10)
                 .mapToObj(i -> evaluated(Instant.parse("2026-09-01T00:00:00Z").plusSeconds(i * 3600L)))
                 .toList();
 
-        CalibrationAssessment assessment = assessor.assess(snapshots);
+        CalibrationAssessment assessment = lowThresholdAssessor.assess(snapshots);
 
         assertThat(assessment.realSampleCount()).isEqualTo(10);
         assertThat(assessment.trainingSampleCount()).isEqualTo(7);

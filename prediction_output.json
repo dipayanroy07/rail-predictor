@@ -28,7 +28,8 @@
     "historicalAdjustmentProvenance" : "mock-provider",
     "recoveryMinutes" : 3,
     "predictedTotalDelayMinutes" : 41,
-    "predictedEta" : "2026-09-09T20:25:00Z"
+    "predictedEta" : "2026-09-09T20:25:00Z",
+    "predictedNextStationDelayMinutes" : 41
   },
   "simulation" : {
     "triggeredDisruptions" : [ {

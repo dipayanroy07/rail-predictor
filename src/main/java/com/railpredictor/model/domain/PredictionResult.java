@@ -35,6 +35,21 @@ import java.util.List;
  * {@code disruptionimpact.SimulationSuppression} for how the corresponding simulated
  * {@code DisruptionModel} is suppressed whenever a real disruption of the same kind is active, so
  * the two are never additive for the same underlying cause.
+ *
+ * <p><b>Phase 21 - two distinct scopes, never conflated:</b> {@code historicalAdjustmentMinutes}/
+ * {@code predictedTotalDelayMinutes}/{@code predictedEta} are <em>destination</em>-scoped (derived
+ * from {@code train.remainingDistanceKm()} and, when the historical source is {@code SECTION}, the
+ * <em>sum</em> across every remaining section). {@code nextStationHistoricalAdjustmentMinutes}/
+ * {@code predictedNextStationDelayMinutes} are the separate, <em>next-station</em>-scoped
+ * counterparts - the only values evaluated against a real outcome (see {@code PredictionSnapshot}).
+ * {@code disruptionImpactAssessment.additionalDelayMinutes()} is already correctly next-section-
+ * scoped (a disruption is only ever queried/assessed for the current section) and is legitimately
+ * reused, unchanged, in <em>both</em> {@code predictedTotalDelayMinutes} and
+ * {@code predictedNextStationDelayMinutes} - reuse across two distinct output formulas is not
+ * double-counting; double-counting would mean adding it twice <em>within</em> one formula, which
+ * neither does. See docs/prediction-model.md's Phase 21 notes for the full arithmetic and the
+ * exact reason {@code nextStationHistoricalAdjustmentMinutes} had to be a new, separate value
+ * rather than reusing {@code historicalAdjustmentMinutes}.
  */
 public record PredictionResult(
         String trainNumber,
@@ -59,7 +74,56 @@ public record PredictionResult(
         List<String> warnings,
         HistoricalAdjustmentResolution historicalAdjustmentResolution,
         String weatherProvenance,
-        DisruptionImpactAssessment disruptionImpactAssessment) {
+        DisruptionImpactAssessment disruptionImpactAssessment,
+        int nextStationHistoricalAdjustmentMinutes,
+        HistoricalAdjustmentResolution nextStationHistoricalAdjustmentResolution,
+        int predictedNextStationDelayMinutes) {
+
+    /** Pre-Phase-21 shape, preserved so existing callers/tests need not change: derives the three
+     * new fields from what's already available - {@code nextStationHistoricalAdjustmentMinutes}
+     * defaults to {@code 0}/{@code NONE} (correct for any caller not concerned with next-station
+     * scoping - it never had a next-station-scoped historical value to report), and
+     * {@code predictedNextStationDelayMinutes} is computed the same way
+     * {@code PredictionSnapshotRecorder} always has:
+     * {@code currentDelayMinutes + predictedExtraDelayMinutes} plus this constructor's own default
+     * {@code nextStationHistoricalAdjustmentMinutes} (0) plus the already-next-section-scoped
+     * {@code disruptionImpactAssessment} contribution, clamped at 0. */
+    public PredictionResult(
+            String trainNumber,
+            String trainName,
+            TrainStatus status,
+            Station currentStation,
+            Station nextStation,
+            int currentDelayMinutes,
+            double distanceFromOriginKm,
+            Double remainingDistanceKm,
+            Double estimatedSpeedKmh,
+            SectionType sectionType,
+            double baseTravelTimeMinutes,
+            int predictedExtraDelayMinutes,
+            int historicalAdjustmentMinutes,
+            int recoveryMinutes,
+            int predictedTotalDelayMinutes,
+            Instant predictedEta,
+            ConfidenceScore confidence,
+            List<DisruptionResult> disruptions,
+            List<CascadeEffect> cascadeEffects,
+            List<String> warnings,
+            HistoricalAdjustmentResolution historicalAdjustmentResolution,
+            String weatherProvenance,
+            DisruptionImpactAssessment disruptionImpactAssessment) {
+        this(trainNumber, trainName, status, currentStation, nextStation, currentDelayMinutes,
+                distanceFromOriginKm, remainingDistanceKm, estimatedSpeedKmh, sectionType,
+                baseTravelTimeMinutes, predictedExtraDelayMinutes, historicalAdjustmentMinutes,
+                recoveryMinutes, predictedTotalDelayMinutes, predictedEta, confidence, disruptions,
+                cascadeEffects, warnings, historicalAdjustmentResolution, weatherProvenance,
+                disruptionImpactAssessment,
+                0,
+                new HistoricalAdjustmentResolution(HistoricalAdjustmentSource.NONE, DataProvenance.UNAVAILABLE),
+                Math.max(0, currentDelayMinutes + predictedExtraDelayMinutes
+                        + (disruptionImpactAssessment.additionalDelayMinutes() == null
+                                ? 0 : disruptionImpactAssessment.additionalDelayMinutes())));
+    }
 
     /** Pre-Phase-19 shape, preserved so existing callers need not change: defaults
      * {@code disruptionImpactAssessment} to {@link DisruptionImpactAssessment#unavailable()} -
@@ -184,5 +248,8 @@ public record PredictionResult(
         warnings = List.copyOf(Guard.requireNonNull(warnings, "warnings"));
         historicalAdjustmentResolution = Guard.requireNonNull(historicalAdjustmentResolution, "historicalAdjustmentResolution");
         disruptionImpactAssessment = Guard.requireNonNull(disruptionImpactAssessment, "disruptionImpactAssessment");
+        nextStationHistoricalAdjustmentResolution =
+                Guard.requireNonNull(nextStationHistoricalAdjustmentResolution, "nextStationHistoricalAdjustmentResolution");
+        Guard.requireNonNegative(predictedNextStationDelayMinutes, "predictedNextStationDelayMinutes");
     }
 }

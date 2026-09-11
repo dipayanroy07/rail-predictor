@@ -35,7 +35,7 @@ class CalibrationEvaluationReportBuilderTest {
                         confidenceProperties, calibrationProperties, new PredictionAccuracyCalculator(), new ErrorDistributionCalculator()),
                 new HistoricalWeightCalibrationAssessor(
                         new ChronologicalSplitter(), new HistoricalAdjustmentProperties(0.3, 5), calibrationProperties),
-                new DisruptionImpactCalibrationAssessor());
+                new DisruptionImpactCalibrationAssessor(calibrationProperties));
     }
 
     private static PredictionSnapshot evaluated() {

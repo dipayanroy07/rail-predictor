@@ -38,7 +38,8 @@ public class PredictionOutputMapper {
                 result.historicalAdjustmentResolution().provenance(),
                 result.recoveryMinutes(),
                 result.predictedTotalDelayMinutes(),
-                result.predictedEta());
+                result.predictedEta(),
+                result.predictedNextStationDelayMinutes());
 
         SimulationResponse simulation = new SimulationResponse(triggeredDisruptions, cascadeEffects, result.recoveryMinutes());
 

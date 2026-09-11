@@ -31,6 +31,13 @@ import org.springframework.stereotype.Component;
  * not the destination, is the evaluation target. A train with no next station (already
  * arrived/terminated) has nothing to evaluate, so no snapshot is recorded at all in that case -
  * this is the ordinary, expected "nothing to do" case, not a failure.
+ *
+ * <p>{@code predictedNextStationDelayMinutes} (Phase 21) is read directly from
+ * {@code result.predictedNextStationDelayMinutes()} - {@code PredictionEngine} is now the single
+ * place that formula is computed; this recorder never recomputes it itself (previously it did,
+ * as {@code currentDelayMinutes + predictedExtraDelayMinutes}, which is exactly why historical
+ * adjustment/disruption impact could never enter the evaluated metric - see
+ * docs/prediction-model.md's Phase 21 notes).
  */
 @Component
 public class PredictionSnapshotRecorder {
@@ -71,7 +78,7 @@ public class PredictionSnapshotRecorder {
                     Instant.now(clock),
                     nextStation.code(),
                     result.currentDelayMinutes(),
-                    result.currentDelayMinutes() + result.predictedExtraDelayMinutes(),
+                    result.predictedNextStationDelayMinutes(),
                     result.predictedTotalDelayMinutes(),
                     result.predictedEta(),
                     result.historicalAdjustmentMinutes(),
@@ -82,7 +89,11 @@ public class PredictionSnapshotRecorder {
                     null, null, null,
                     PredictionEvaluationMode.LIVE_EVALUATION,
                     result.weatherProvenance(),
-                    result.disruptionImpactAssessment().additionalDelayMinutes());
+                    result.disruptionImpactAssessment().additionalDelayMinutes(),
+                    result.nextStationHistoricalAdjustmentMinutes(),
+                    result.nextStationHistoricalAdjustmentResolution().source(),
+                    result.nextStationHistoricalAdjustmentResolution().provenance(),
+                    result.predictedExtraDelayMinutes());
             repository.get().save(entityMapper.toEntity(snapshot));
         } catch (RuntimeException e) {
             log.warn("Could not record prediction snapshot for train {}: {}", result.trainNumber(), e.getMessage());

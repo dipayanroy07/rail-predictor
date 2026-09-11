@@ -33,13 +33,24 @@ import org.springframework.stereotype.Component;
  * candidate is used as the best available guess, but the result is marked
  * {@code EVALUATED_APPROXIMATE}, never silently treated as certain.
  *
- * <p><b>{@code evaluationMode}/{@code weatherProvenance}/{@code disruptionImpactMinutes} are
- * carried through unchanged (Phase 16H-7/17/19).</b> This method never decides or recomputes which
- * process originally produced the snapshot, or what weather/disruption data it was made with -
- * every one is copied verbatim onto the returned snapshot, exactly like
+ * <p><b>{@code evaluationMode}/{@code weatherProvenance}/{@code disruptionImpactMinutes}/every
+ * Phase 21 next-station field are carried through unchanged (Phase 16H-7/17/19/21).</b> This
+ * method never decides or recomputes which process originally produced the snapshot, or what
+ * weather/disruption/historical data it was made with - every one is copied verbatim onto the
+ * returned snapshot via the full canonical constructor, exactly like
  * {@code historicalAdjustmentSource}/{@code historicalAdjustmentProvenance}. The snapshot is the
  * audit record of how (and with what data) the prediction was made; evaluating its outcome must
  * never alter that record.
+ *
+ * <p><b>Phase 22 fix:</b> this method previously reconstructed the evaluated snapshot via the
+ * pre-Phase-21 constructor, which silently reset {@code nextStationHistoricalAdjustmentMinutes}/
+ * {@code nextStationHistoricalAdjustmentSource}/{@code nextStationHistoricalAdjustmentProvenance}
+ * to {@code 0}/{@code NONE}/{@code UNAVAILABLE} and mis-derived {@code predictedExtraDelayMinutes}
+ * (as {@code predictedNextStationDelayMinutes - currentDelayMinutes}, which double-counts the
+ * next-station historical/disruption contribution back into "simulation") on every evaluated
+ * snapshot - corrupting the exact audit trail Phase 21 introduced, the moment a snapshot was
+ * evaluated. Fixed by using the full canonical constructor and copying every Phase 21 field
+ * verbatim, exactly like every other pre-existing field here.
  */
 @Component
 public class PredictionOutcomeMatcher {
@@ -96,6 +107,10 @@ public class PredictionOutcomeMatcher {
                 match.observedAt(),
                 snapshot.evaluationMode(),
                 snapshot.weatherProvenance(),
-                snapshot.disruptionImpactMinutes());
+                snapshot.disruptionImpactMinutes(),
+                snapshot.nextStationHistoricalAdjustmentMinutes(),
+                snapshot.nextStationHistoricalAdjustmentSource(),
+                snapshot.nextStationHistoricalAdjustmentProvenance(),
+                snapshot.predictedExtraDelayMinutes());
     }
 }

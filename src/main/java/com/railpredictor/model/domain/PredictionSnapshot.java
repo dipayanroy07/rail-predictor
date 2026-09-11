@@ -64,6 +64,24 @@ import java.time.Instant;
  * docs/prediction-model.md's Phase 19 notes. No such comparison is built yet (no accuracy-report
  * breakdown by this field exists), and none is claimed to be calibrated - see
  * {@code CalibrationStatus}.
+ *
+ * <p>{@code nextStationHistoricalAdjustmentMinutes}/{@code nextStationHistoricalAdjustmentSource}/
+ * {@code nextStationHistoricalAdjustmentProvenance} (Phase 21) are the separate, next-station-
+ * scoped counterpart to {@code historicalAdjustmentMinutes}/{@code historicalAdjustmentSource}/
+ * {@code historicalAdjustmentProvenance} (which remain destination-scoped, unchanged in meaning -
+ * see {@code PredictionResult}'s own Javadoc). <b>This is the field that genuinely entered
+ * {@code predictedNextStationDelayMinutes}</b> - before Phase 21, neither the destination-scoped
+ * nor any next-station-scoped historical value was included in {@code predictedNextStationDelayMinutes}
+ * at all (it was {@code currentDelayMinutes + predictedExtraDelayMinutes} only), which is exactly
+ * the structural gap Phase 20 found. See docs/prediction-model.md's Phase 21 notes.
+ *
+ * <p>{@code predictedExtraDelayMinutes} (Phase 21) is simulation's own raw contribution -
+ * {@code PredictionResult.predictedExtraDelayMinutes()} at prediction time, persisted directly so
+ * a future ablation can isolate "with vs. without simulation" exactly
+ * ({@code predictedNextStationDelayMinutes - currentDelayMinutes - nextStationHistoricalAdjustmentMinutes
+ * - (disruptionImpactMinutes or 0)} would otherwise be ambiguous whenever the sum was clamped at
+ * 0 - see {@code PredictionEngine}). Always non-negative (simulation's own contribution is never
+ * itself negative - see {@code DelayCalculator}).
  */
 public record PredictionSnapshot(
         Long id,
@@ -84,7 +102,46 @@ public record PredictionSnapshot(
         Instant evaluatedAt,
         PredictionEvaluationMode evaluationMode,
         String weatherProvenance,
-        Integer disruptionImpactMinutes) {
+        Integer disruptionImpactMinutes,
+        int nextStationHistoricalAdjustmentMinutes,
+        HistoricalAdjustmentSource nextStationHistoricalAdjustmentSource,
+        String nextStationHistoricalAdjustmentProvenance,
+        int predictedExtraDelayMinutes) {
+
+    /** Pre-Phase-21 shape, preserved so existing callers/tests need not change: defaults the new
+     * historical fields to {@code 0}/{@code NONE}/{@code UNAVAILABLE} and
+     * {@code predictedExtraDelayMinutes} to {@code predictedNextStationDelayMinutes -
+     * currentDelayMinutes} (exact for every snapshot created before this phase, since the old
+     * formula was exactly {@code currentDelayMinutes + predictedExtraDelayMinutes}, clamping never
+     * having been a factor because both addends were already non-negative). */
+    public PredictionSnapshot(
+            Long id,
+            String trainNumber,
+            Instant predictionMadeAt,
+            String targetStationCode,
+            int currentDelayMinutes,
+            int predictedNextStationDelayMinutes,
+            int predictedTotalDelayMinutes,
+            Instant predictedEta,
+            int historicalAdjustmentMinutes,
+            HistoricalAdjustmentSource historicalAdjustmentSource,
+            String historicalAdjustmentProvenance,
+            double confidenceScore,
+            PredictionEvaluationStatus evaluationStatus,
+            Integer actualDelayMinutes,
+            Integer errorMinutes,
+            Instant evaluatedAt,
+            PredictionEvaluationMode evaluationMode,
+            String weatherProvenance,
+            Integer disruptionImpactMinutes) {
+        this(id, trainNumber, predictionMadeAt, targetStationCode, currentDelayMinutes,
+                predictedNextStationDelayMinutes, predictedTotalDelayMinutes, predictedEta,
+                historicalAdjustmentMinutes, historicalAdjustmentSource, historicalAdjustmentProvenance,
+                confidenceScore, evaluationStatus, actualDelayMinutes, errorMinutes, evaluatedAt,
+                evaluationMode, weatherProvenance, disruptionImpactMinutes,
+                0, HistoricalAdjustmentSource.NONE, DataProvenance.UNAVAILABLE,
+                predictedNextStationDelayMinutes - currentDelayMinutes);
+    }
 
     /** Pre-Phase-19 shape, preserved so existing callers/tests need not change: defaults
      * {@code disruptionImpactMinutes} to {@code null} - correct for every snapshot created before
@@ -182,6 +239,12 @@ public record PredictionSnapshot(
         if (disruptionImpactMinutes != null) {
             Guard.requireNonNegative(disruptionImpactMinutes, "disruptionImpactMinutes");
         }
+        nextStationHistoricalAdjustmentSource =
+                Guard.requireNonNull(nextStationHistoricalAdjustmentSource, "nextStationHistoricalAdjustmentSource");
+        nextStationHistoricalAdjustmentProvenance = Guard.requireNonBlank(
+                nextStationHistoricalAdjustmentProvenance, "nextStationHistoricalAdjustmentProvenance");
+        Guard.requireNonNegative(predictedNextStationDelayMinutes, "predictedNextStationDelayMinutes");
+        Guard.requireNonNegative(predictedExtraDelayMinutes, "predictedExtraDelayMinutes");
 
         boolean evaluated = evaluationStatus == PredictionEvaluationStatus.EVALUATED_EXACT
                 || evaluationStatus == PredictionEvaluationStatus.EVALUATED_APPROXIMATE;

@@ -91,6 +91,24 @@ public class PredictionSnapshotEntity {
     @Column(name = "disruption_impact_minutes")
     private Integer disruptionImpactMinutes;
 
+    /** Phase 21: the separate, next-station-scoped historical adjustment that genuinely
+     * contributes to {@code predictedNextStationDelayMinutes} - see
+     * {@link com.railpredictor.model.domain.PredictionSnapshot}'s own Javadoc. Never to be
+     * confused with {@link #historicalAdjustmentMinutes}, which remains destination-scoped. */
+    @Column(name = "next_station_historical_adjustment_minutes", nullable = false)
+    private int nextStationHistoricalAdjustmentMinutes;
+
+    @Column(name = "next_station_historical_adjustment_source", nullable = false, length = 20)
+    private String nextStationHistoricalAdjustmentSource;
+
+    @Column(name = "next_station_historical_adjustment_provenance", nullable = false, length = 200)
+    private String nextStationHistoricalAdjustmentProvenance;
+
+    /** Phase 21: simulation's own raw contribution, persisted directly for unambiguous future
+     * ablation - see {@link com.railpredictor.model.domain.PredictionSnapshot}'s own Javadoc. */
+    @Column(name = "predicted_extra_delay_minutes", nullable = false)
+    private int predictedExtraDelayMinutes;
+
     protected PredictionSnapshotEntity() {
         // required by JPA
     }
@@ -176,6 +194,12 @@ public class PredictionSnapshotEntity {
                 evaluationMode, weatherProvenance, null);
     }
 
+    /** Pre-Phase-21 shape, preserved so existing callers/tests need not change: defaults the three
+     * new next-station-historical fields to {@code 0}/{@code "NONE"}/{@code "unavailable"}, and
+     * {@code predictedExtraDelayMinutes} to {@code predictedNextStationDelayMinutes -
+     * currentDelayMinutes} (exact for every row created before this phase - see
+     * {@link com.railpredictor.model.domain.PredictionSnapshot}'s own backward-compatible
+     * constructor for why). */
     public PredictionSnapshotEntity(
             String trainNumber,
             Instant predictionMadeAt,
@@ -195,6 +219,37 @@ public class PredictionSnapshotEntity {
             String evaluationMode,
             String weatherProvenance,
             Integer disruptionImpactMinutes) {
+        this(trainNumber, predictionMadeAt, targetStationCode, currentDelayMinutes,
+                predictedNextStationDelayMinutes, predictedTotalDelayMinutes, predictedEta,
+                historicalAdjustmentMinutes, historicalAdjustmentSource, historicalAdjustmentProvenance,
+                confidenceScore, evaluationStatus, actualDelayMinutes, errorMinutes, evaluatedAt,
+                evaluationMode, weatherProvenance, disruptionImpactMinutes,
+                0, "NONE", "unavailable", predictedNextStationDelayMinutes - currentDelayMinutes);
+    }
+
+    public PredictionSnapshotEntity(
+            String trainNumber,
+            Instant predictionMadeAt,
+            String targetStationCode,
+            int currentDelayMinutes,
+            int predictedNextStationDelayMinutes,
+            int predictedTotalDelayMinutes,
+            Instant predictedEta,
+            int historicalAdjustmentMinutes,
+            String historicalAdjustmentSource,
+            String historicalAdjustmentProvenance,
+            double confidenceScore,
+            String evaluationStatus,
+            Integer actualDelayMinutes,
+            Integer errorMinutes,
+            Instant evaluatedAt,
+            String evaluationMode,
+            String weatherProvenance,
+            Integer disruptionImpactMinutes,
+            int nextStationHistoricalAdjustmentMinutes,
+            String nextStationHistoricalAdjustmentSource,
+            String nextStationHistoricalAdjustmentProvenance,
+            int predictedExtraDelayMinutes) {
         this.trainNumber = trainNumber;
         this.predictionMadeAt = predictionMadeAt;
         this.targetStationCode = targetStationCode;
@@ -213,6 +268,10 @@ public class PredictionSnapshotEntity {
         this.evaluationMode = evaluationMode;
         this.weatherProvenance = weatherProvenance;
         this.disruptionImpactMinutes = disruptionImpactMinutes;
+        this.nextStationHistoricalAdjustmentMinutes = nextStationHistoricalAdjustmentMinutes;
+        this.nextStationHistoricalAdjustmentSource = nextStationHistoricalAdjustmentSource;
+        this.nextStationHistoricalAdjustmentProvenance = nextStationHistoricalAdjustmentProvenance;
+        this.predictedExtraDelayMinutes = predictedExtraDelayMinutes;
     }
 
     public Long getId() {
@@ -289,6 +348,22 @@ public class PredictionSnapshotEntity {
 
     public Integer getDisruptionImpactMinutes() {
         return disruptionImpactMinutes;
+    }
+
+    public int getNextStationHistoricalAdjustmentMinutes() {
+        return nextStationHistoricalAdjustmentMinutes;
+    }
+
+    public String getNextStationHistoricalAdjustmentSource() {
+        return nextStationHistoricalAdjustmentSource;
+    }
+
+    public String getNextStationHistoricalAdjustmentProvenance() {
+        return nextStationHistoricalAdjustmentProvenance;
+    }
+
+    public int getPredictedExtraDelayMinutes() {
+        return predictedExtraDelayMinutes;
     }
 
     /** Applies the evaluation outcome onto this (already-persisted) row - the only mutation a

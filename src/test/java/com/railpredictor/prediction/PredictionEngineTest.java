@@ -517,6 +517,155 @@ class PredictionEngineTest {
         assertThat(result.warnings()).anyMatch(w -> w.contains("capped"));
     }
 
+    // --- Phase 21: next-station-scoped historical adjustment / predictedNextStationDelayMinutes ---
+
+    private static RemainingRouteHistoricalSummary twoSections(
+            SectionHistoricalDelayResult first, SectionHistoricalDelayResult second, double total, String provenance) {
+        return new RemainingRouteHistoricalSummary(
+                "12345", RouteCompleteness.COMPLETE, List.of(first, second),
+                RemainingRouteHistoricalStatus.PARTIAL_SECTIONS_AVAILABLE, 1, total, provenance);
+    }
+
+    @Test
+    void nextStationHistoricalAdjustmentUsesOnlyTheImmediateSectionNeverTheWholeRouteSum() {
+        // Two AVAILABLE sections: immediate (A->B, +10) and a later one (B->C, +6) - the existing
+        // destination-scoped historicalAdjustmentMinutes correctly sums both (total=16), but the
+        // NEW next-station-scoped value must use ONLY the immediate section's own +10.
+        var train = PredictionFixtures.train(0, 60.0, 60.0);
+        var historicalDelay = PredictionFixtures.historicalDelay(0.0, 0);
+        var summary = new RemainingRouteHistoricalSummary(
+                "12345", RouteCompleteness.COMPLETE,
+                List.of(available("A", "B", 10.0, DataProvenance.RAILRADAR), available("B", "C", 6.0, DataProvenance.RAILRADAR)),
+                RemainingRouteHistoricalStatus.ALL_SECTIONS_AVAILABLE, 2, 16.0, DataProvenance.RAILRADAR);
+        PredictionEngine engine = engine(60.0, 1.0, 5);
+
+        PredictionResult result = engine.predict(
+                train, PredictionFixtures.section(), null, SectionType.CLEAR,
+                PredictionFixtures.simulationResult(0, 0, 0, 0), historicalDelay, summary);
+
+        assertThat(result.historicalAdjustmentMinutes()).isEqualTo(16); // whole-route sum, unchanged (destination-scoped)
+        assertThat(result.nextStationHistoricalAdjustmentMinutes()).isEqualTo(10); // immediate section only
+        assertThat(result.nextStationHistoricalAdjustmentResolution().source()).isEqualTo(HistoricalAdjustmentSource.SECTION);
+        assertThat(result.predictedNextStationDelayMinutes()).isEqualTo(0 + 0 + 10); // current + extra + nextStationHistorical
+    }
+
+    @Test
+    void nextStationFallsBackToStationLevelWhenTheImmediateSectionIsUnusableEvenIfALaterSectionIsAvailable() {
+        // Immediate section (A->B) NOT_FOUND, but a later section (B->C) IS available - the
+        // existing destination-scoped resolution still reports SECTION (it only cares whether ANY
+        // section contributed), but the next-station value must fall back to station-level,
+        // exactly as if no section data existed at all for the immediate section.
+        var train = PredictionFixtures.train(0, 60.0, 60.0);
+        var historicalDelay = PredictionFixtures.historicalDelay(20.0, 40); // round(20*1.0)=20
+        var summary = twoSections(notFound("A", "B"), available("B", "C", 6.0, DataProvenance.RAILRADAR), 6.0, DataProvenance.RAILRADAR);
+        PredictionEngine engine = engine(60.0, 1.0, 5);
+
+        PredictionResult result = engine.predict(
+                train, PredictionFixtures.section(), null, SectionType.CLEAR,
+                PredictionFixtures.simulationResult(0, 0, 0, 0), historicalDelay, summary);
+
+        assertThat(result.historicalAdjustmentResolution().source()).isEqualTo(HistoricalAdjustmentSource.SECTION);
+        assertThat(result.historicalAdjustmentMinutes()).isEqualTo(6); // destination-scoped: unaffected by this fix
+
+        assertThat(result.nextStationHistoricalAdjustmentResolution().source()).isEqualTo(HistoricalAdjustmentSource.STATION_FALLBACK);
+        assertThat(result.nextStationHistoricalAdjustmentMinutes()).isEqualTo(20);
+    }
+
+    @Test
+    void neitherImmediateSectionNorStationUsableProducesNoneSourceAndZeroNextStationAdjustment() {
+        var train = PredictionFixtures.train(0, 60.0, 60.0);
+        var historicalDelay = PredictionFixtures.historicalDelay(0.0, 0); // below minimum sample count -> unusable
+        var summary = twoSections(notFound("A", "B"), available("B", "C", 6.0, DataProvenance.RAILRADAR), 6.0, DataProvenance.RAILRADAR);
+        PredictionEngine engine = engine(60.0, 1.0, 5);
+
+        PredictionResult result = engine.predict(
+                train, PredictionFixtures.section(), null, SectionType.CLEAR,
+                PredictionFixtures.simulationResult(0, 0, 0, 0), historicalDelay, summary);
+
+        assertThat(result.nextStationHistoricalAdjustmentResolution().source()).isEqualTo(HistoricalAdjustmentSource.NONE);
+        assertThat(result.nextStationHistoricalAdjustmentMinutes()).isZero();
+    }
+
+    @Test
+    void predictedNextStationDelayMinutesIncludesSimulationNextStationHistoricalAndDisruptionExactlyOnce() {
+        var train = PredictionFixtures.train(10, 90.0, 60.0);
+        var section = PredictionFixtures.section(90.0);
+        // predictedExtraDelayMinutes (simulation) = 8; whole-route historical = 20 (must NOT appear
+        // in predictedNextStationDelayMinutes); next-station historical = 2; disruption = 5.
+        var simulationResult = PredictionFixtures.simulationResult(15, 3, 10, 8);
+        var historicalDelay = PredictionFixtures.historicalDelay(0.0, 0);
+        var summary = allAvailable(20.0, DataProvenance.RAILRADAR); // single section: total == immediate section's own value
+        PredictionEngine engine = engine(60.0, 0.1, 5); // weight 0.1 * 20 = 2 for both (single-section case)
+        com.railpredictor.model.domain.DisruptionImpact contributing = new com.railpredictor.model.domain.DisruptionImpact(
+                com.railpredictor.model.domain.RailwayDisruptionType.ENGINEERING_BLOCK,
+                com.railpredictor.model.domain.DisruptionImpactStatus.ESTIMATED, 5, "heuristic", DataProvenance.MOCK);
+        com.railpredictor.model.domain.DisruptionImpactAssessment assessment =
+                new com.railpredictor.model.domain.DisruptionImpactAssessment(
+                        com.railpredictor.model.domain.DisruptionImpactStatus.ESTIMATED, 5, List.of(contributing), false,
+                        com.railpredictor.model.domain.CalibrationStatus.INSUFFICIENT_DATA);
+
+        PredictionResult result = engine.predict(
+                train, section, null, SectionType.NORMAL, simulationResult, historicalDelay, summary, assessment);
+
+        // current(10) + extra(8) + nextStationHistorical(2) + disruption(5) = 25
+        assertThat(result.predictedNextStationDelayMinutes()).isEqualTo(25);
+        // predictedTotalDelayMinutes independently: current(10) + extra(8) + wholeRouteHistorical(2) + disruption(5) = 25
+        // (equal here only because this is a single-section summary - see the two-section test above
+        // for the case where they genuinely differ)
+        assertThat(result.predictedTotalDelayMinutes()).isEqualTo(25);
+    }
+
+    @Test
+    void predictedNextStationDelayMinutesNeverDoubleCountsTheWholeRouteHistoricalValue() {
+        // Two-section summary so the whole-route historical (16) genuinely differs from the
+        // next-station-scoped one (10) - proves predictedNextStationDelayMinutes uses ONLY the
+        // next-station-scoped figure, never both, never the whole-route one.
+        var train = PredictionFixtures.train(0, 60.0, 60.0);
+        var historicalDelay = PredictionFixtures.historicalDelay(0.0, 0);
+        var summary = new RemainingRouteHistoricalSummary(
+                "12345", RouteCompleteness.COMPLETE,
+                List.of(available("A", "B", 10.0, DataProvenance.RAILRADAR), available("B", "C", 6.0, DataProvenance.RAILRADAR)),
+                RemainingRouteHistoricalStatus.ALL_SECTIONS_AVAILABLE, 2, 16.0, DataProvenance.RAILRADAR);
+        PredictionEngine engine = engine(60.0, 1.0, 5);
+
+        PredictionResult result = engine.predict(
+                train, PredictionFixtures.section(), null, SectionType.CLEAR,
+                PredictionFixtures.simulationResult(0, 0, 0, 0), historicalDelay, summary);
+
+        assertThat(result.predictedTotalDelayMinutes()).isEqualTo(16); // current(0)+extra(0)+wholeRoute(16)
+        assertThat(result.predictedNextStationDelayMinutes()).isEqualTo(10); // current(0)+extra(0)+nextStation(10) - NOT 16, NOT 26
+    }
+
+    @Test
+    void predictedNextStationDelayMinutesClampsAtZeroJustLikePredictedTotalDelayMinutes() {
+        var train = PredictionFixtures.train(0, 60.0, 60.0);
+        var historicalDelay = PredictionFixtures.historicalDelay(0.0, 0);
+        var summary = allAvailable(-50.0, DataProvenance.RAILRADAR); // large negative section adjustment
+        PredictionEngine engine = engine(60.0, 1.0, 5);
+
+        PredictionResult result = engine.predict(
+                train, PredictionFixtures.section(), null, SectionType.CLEAR,
+                PredictionFixtures.simulationResult(0, 0, 0, 0), historicalDelay, summary);
+
+        assertThat(result.nextStationHistoricalAdjustmentMinutes()).isEqualTo(-50);
+        assertThat(result.predictedNextStationDelayMinutes()).isZero();
+    }
+
+    @Test
+    void theLegacyEightArgumentOverloadDefaultsNextStationFieldsConsistentlyWithPrePhase21Behavior() {
+        var train = PredictionFixtures.train(12, 90.0, 60.0);
+        var section = PredictionFixtures.section(90.0);
+        var simulationResult = PredictionFixtures.simulationResult(15, 3, 10, 8);
+        var historicalDelay = PredictionFixtures.historicalDelay(15.0, 40);
+        PredictionEngine engine = engine(60.0, 0.2, 5);
+
+        PredictionResult result = engine.predict(train, section, null, SectionType.NORMAL, simulationResult, historicalDelay);
+
+        // Pre-Phase-21 formula: currentDelay(12) + predictedExtraDelay(8) + nextStationHistorical(3,
+        // station-level fallback, same as historicalAdjustmentMinutes here since there's no section data)
+        assertThat(result.predictedNextStationDelayMinutes()).isEqualTo(12 + 8 + 3);
+    }
+
     private static RemainingRouteHistoricalSummary unavailableSectionSummary(String trainNumber) {
         return new RemainingRouteHistoricalSummary(
                 trainNumber, RouteCompleteness.UNAVAILABLE, List.of(),

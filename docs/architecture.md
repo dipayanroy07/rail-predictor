@@ -1063,3 +1063,37 @@ accuracy-tracking/reporting work — those remain future phases.
   sample sizes this environment had available (zero - `prediction.evaluation.enabled=false`
   by default, no `postgres` profile active in any verification run this
   phase performed).
+
+- **Phase 21** corrects the exact structural gap Phase 20 found:
+  `predictedNextStationDelayMinutes` (the only evaluated metric) never
+  included historical adjustment or disruption impact, and the existing
+  section-level historical adjustment (Phase 16H-2) is itself scoped to the
+  whole remaining route (a correct input for the destination-scoped
+  `predictedTotalDelayMinutes`, but wrong for a next-station value). Fix:
+  `PredictionEngine` now computes a *separate*, correctly next-station-
+  scoped `nextStationHistoricalAdjustmentMinutes` (using only
+  `sectionResults().get(0)`, the immediate section, never the whole-route
+  sum) and folds it - plus the already-correctly-scoped
+  `disruptionImpactMinutes` - into a new, authoritative
+  `predictedNextStationDelayMinutes` field on `PredictionResult`.
+  `PredictionSnapshotRecorder` now reads this field directly rather than
+  recomputing it as `currentDelayMinutes + predictedExtraDelayMinutes`
+  (the old formula, and the exact reason historical/disruption could never
+  enter the evaluated metric before this phase).
+
+  Migration `V8` adds three columns to `prediction_snapshots`:
+  `next_station_historical_adjustment_minutes`/`_source`/`_provenance`
+  (the new next-station-scoped historical figure) and
+  `predicted_extra_delay_minutes` (simulation's own raw contribution,
+  persisted directly for unambiguous future ablation). Phase 20's
+  `HistoricalWeightCalibrationAssessor`/`DisruptionImpactCalibrationAssessor`
+  no longer report `METRIC_STRUCTURALLY_UNAFFECTED` - both parameters now
+  genuinely affect the evaluated metric - but still report
+  `INSUFFICIENT_DATA` (via `INSUFFICIENT_SAMPLE_SIZE`/`MOCK_DATA_ONLY`)
+  since zero real snapshots exist and no candidate-search algorithm is
+  implemented yet. `PredictionBreakdownResponse` (REST) gains a nullable-
+  compatible `predictedNextStationDelayMinutes` field.
+
+  See docs/prediction-model.md's own Phase 21 section for the full
+  before/after arithmetic and exactly why disruption impact needed only a
+  wiring fix while historical adjustment needed a genuine scope correction.

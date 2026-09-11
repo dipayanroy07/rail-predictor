@@ -48,6 +48,17 @@ public class SectionHistoricalDelayCalculator {
         if (total == null) {
             return null;
         }
-        return (int) Math.round(total * properties.weight());
+        return weightedMinutes(total);
+    }
+
+    /**
+     * Applies the one configured weight to a raw historical delay-change figure (Phase 21) -
+     * factored out of {@link #sectionAdjustmentMinutes} so a caller needing the <em>same</em>
+     * weighting applied to a single section's own average (rather than the whole-remaining-route
+     * {@code totalDelayChangeMinutes} sum) - see {@code PredictionEngine}'s next-station-scoped
+     * historical resolution - uses exactly one weighting rule, never a second, divergent one.
+     */
+    public int weightedMinutes(double rawDelayChangeMinutes) {
+        return (int) Math.round(rawDelayChangeMinutes * properties.weight());
     }
 }

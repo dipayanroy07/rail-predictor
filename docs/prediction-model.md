@@ -790,3 +790,131 @@ latter, honestly reports that the machinery currently has nothing to work with (
 recorded snapshots in this environment - `prediction.evaluation.enabled=false` by default and no
 `postgres` profile active in any verification run this phase performed), and refuses to manufacture
 a calibrated-sounding number in the meantime.
+
+## Phase 21: evaluation scope correction - fixing what Phase 20 found, not just reporting it
+
+Phase 20 found that historical adjustment and disruption impact were structurally excluded from
+`predictedNextStationDelayMinutes`. Phase 21 traces exactly why and fixes it - without changing the
+evaluation target (still next-station arrival delay) and without fabricating any data.
+
+### The audit: two different bugs, not one
+
+**Bug 1 - a genuine scope mismatch (historical adjustment).** `historicalAdjustmentMinutes`, when
+its source is `SECTION` (Phase 16H-2), is `RemainingRouteHistoricalSummary.totalDelayChangeMinutes()`
+- the signed **sum** of every remaining section's own historical delay-change, from `PredictionEngine`'s
+current position all the way to the destination. This is the correct input for the destination-scoped
+`predictedTotalDelayMinutes`/`predictedEta` - it always has been. But it is the wrong number for a
+next-station value: a train's tendency to gain or lose time three sections from now says nothing
+about what happens between here and the very next station. Simply adding this whole-route sum to
+`predictedNextStationDelayMinutes` (the naive fix) would have been just as wrong as the omission -
+it would silently leak downstream information into a next-station prediction.
+
+**Bug 2 - a pure wiring gap, no scope problem (disruption impact).** `disruptionImpactMinutes` was
+already correctly next-section-scoped before this phase: `PredictionService` always calls
+`railwayDisruptionProvider.getDisruptions(trainNumber, section, now)` and
+`disruptionImpactAggregator.assess(queryResult, section, train, now)` with `section` being exactly
+the train's current section (current station → next station) - never the whole remaining route. The
+only reason it never affected `predictedNextStationDelayMinutes` is that `PredictionSnapshotRecorder`
+computed that field as `currentDelayMinutes + predictedExtraDelayMinutes` only, never consulting
+`disruptionImpactAssessment` at all. Wiring it in required no scope correction, only wiring.
+
+Simulation's contribution (`predictedExtraDelayMinutes`) was already correctly scoped and already
+included - Phase 20's own finding, unchanged by this phase.
+
+### Corrected arithmetic
+
+Two formulas now coexist, each with its own scope, each computed once by `PredictionEngine`, never
+re-derived elsewhere:
+
+```
+predictedTotalDelayMinutes (destination-scoped, UNCHANGED by this phase)
+  = max(0, currentDelayMinutes
+           + predictedExtraDelayMinutes        (simulation, current section)
+           + historicalAdjustmentMinutes       (whole-remaining-route sum, or station-level)
+           + disruptionImpactMinutes)          (current section only)
+
+predictedNextStationDelayMinutes (next-station-scoped, the evaluated target - CORRECTED)
+  = max(0, currentDelayMinutes
+           + predictedExtraDelayMinutes            (same simulation figure - legitimate reuse)
+           + nextStationHistoricalAdjustmentMinutes (NEW - immediate section only, or station-level)
+           + disruptionImpactMinutes)               (same disruption figure - legitimate reuse)
+```
+
+`predictedExtraDelayMinutes` and `disruptionImpactMinutes` appear in **both** formulas - this is
+legitimate reuse across two distinct output values, not double-counting (double-counting would mean
+adding a term twice within one formula, which neither does). Only the historical term differs
+between the two formulas, because only the historical term had a genuine scope mismatch.
+
+### `nextStationHistoricalAdjustmentMinutes` - how it's resolved
+
+`PredictionEngine.resolveNextStationHistoricalAdjustment` mirrors the existing SECTION →
+STATION_FALLBACK → NONE replacement policy, but with one critical difference: **only
+`sectionHistoricalSummary.sectionResults().get(0)`** - the immediate next section, guaranteed by
+`RemainingRouteHistoricalAggregator`/`LiveDataRouteProvider` to be built in route order starting
+from the current position - **may produce a `SECTION`-sourced value**, and only when its own
+`status()` is `AVAILABLE`. Never `totalDelayChangeMinutes()`. This can genuinely resolve
+differently from the destination-scoped resolution: if the immediate section itself has no usable
+history but a later remaining section does, the destination-scoped resolution still correctly
+reports `SECTION` (a real signal exists for the whole-route total), while the next-station-scoped
+resolution correctly falls back to station-level history instead - exactly as if no section data
+existed at all for the immediate section. The existing station-level fallback needed no change: it
+was already next-station-scoped (`PredictionService` always fetches `HistoricalDelay` for the
+current section).
+
+### `PredictionSnapshot` changes (migration `V8`)
+
+Three new columns support the corrected metric and future ablation:
+
+- `next_station_historical_adjustment_minutes`/`_source`/`_provenance` - the new, correctly-scoped
+  historical contribution and its resolution, mirroring the existing (destination-scoped)
+  `historical_adjustment_*` columns exactly in shape.
+- `predicted_extra_delay_minutes` - simulation's own raw contribution, persisted directly rather
+  than left to be reconstructed from `predictedNextStationDelayMinutes - currentDelayMinutes`
+  (which became ambiguous once historical/disruption also contribute to that sum, and would have
+  been silently wrong whenever the sum was clamped at 0).
+
+All three are backfilled for pre-Phase-21 rows with values that are exactly true of those rows (not
+guesses): `next_station_historical_adjustment_minutes/source/provenance` default to
+`0`/`'NONE'`/`'unavailable'` (no historical signal ever entered the pre-Phase-21 formula, so this is
+a correct historical fact, not an assumption), and `predicted_extra_delay_minutes` is backfilled as
+`predicted_next_station_delay_minutes - current_delay_minutes` (exact for every pre-Phase-21 row,
+since that was the entire old formula).
+
+### Phase 20 calibration framework - corrected conclusions, not re-run
+
+`HistoricalWeightCalibrationAssessor`/`DisruptionImpactCalibrationAssessor` no longer report
+`CalibrationBlockerReason.METRIC_STRUCTURALLY_UNAFFECTED` - both parameters now genuinely affect
+`predictedNextStationDelayMinutes`. They report `INSUFFICIENT_SAMPLE_SIZE` (or, for disruption
+impact, `MOCK_DATA_ONLY` once enough samples exist but mock-vs-real disruption provenance still
+can't be verified - see limitations below) instead, whenever real data is insufficient - which, in
+this environment, is always true today (zero real snapshots). **This phase does not implement an
+actual candidate-weight search/selection algorithm** - even with abundant real data, these
+assessors still report `INSUFFICIENT_DATA` rather than fabricate a `PROVISIONALLY_CALIBRATED`/
+`VALIDATED` result no real search produced. Building that search is the recommended next phase.
+
+`DataQualityAssessor.historicalAvailableCount` now reflects `nextStationHistoricalAdjustmentSource`
+(the field that genuinely enters the evaluated metric), not the destination-scoped
+`historicalAdjustmentSource`. `simulationContributedCount` and `SimulationContributionEvaluator` now
+read `predictedExtraDelayMinutes` directly rather than deriving it from
+`predictedNextStationDelayMinutes - currentDelayMinutes`, which would have misattributed historical/
+disruption contributions to simulation once those started contributing to the same sum.
+
+### Ablation readiness
+
+With `nextStationHistoricalAdjustmentMinutes`, `disruptionImpactMinutes`, and
+`predictedExtraDelayMinutes` all now persisted as independent, directly-observed contributions, a
+future phase can reconstruct `CURRENT_DELAY_ONLY`/`+HISTORICAL`/`+DISRUPTION`/`+SIMULATION`
+counterfactuals by subtraction from real snapshots - no fabricated counterfactual predictions
+needed, since every term is a real, already-computed number. What still cannot be reconstructed:
+which of the six simulation models contributed to `predictedExtraDelayMinutes` (only the aggregate
+is persisted), and whether a given `disruptionImpactMinutes` value came from a real or mock
+disruption provider (no provenance field exists for it yet - see limitations).
+
+### Remaining limitations (unchanged or newly documented by this phase)
+
+- Zero real evaluation snapshots exist in this environment - every calibration conclusion remains
+  `INSUFFICIENT_DATA` regardless of the metric correction.
+- No candidate-weight search/selection algorithm exists yet for `prediction.historical-adjustment.weight`.
+- No mock-vs-real provenance field exists for disruption impact, so mock-data exclusion (a real
+  requirement once calibration is attempted) cannot yet be mechanically enforced.
+- Individual simulation models cannot be isolated from the aggregate `predictedExtraDelayMinutes`.

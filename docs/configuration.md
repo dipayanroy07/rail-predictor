@@ -167,6 +167,11 @@ refreshing a profile is always an explicit, deliberate call (never automatic), i
 `IllegalStateException` rather than silently no-op-ing when the database isn't configured - a
 caller asking for a refresh deserves to know it didn't happen.
 
+**Enabling real evaluation-data collection end-to-end (Phase 22)** combines this profile with a few
+other already-existing properties into one deliberate operational bundle - see
+docs/historical-data-design.md's own Phase 22 section for the full property list, the exact
+snapshot/outcome lifecycle, and current limitations.
+
 ### Choosing which `HistoricalDelayProvider` is active (Phase 16B)
 
 | Property | Default | Meaning |

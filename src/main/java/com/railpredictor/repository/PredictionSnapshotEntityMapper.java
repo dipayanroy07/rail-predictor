@@ -33,7 +33,11 @@ public class PredictionSnapshotEntityMapper {
                 snapshot.evaluatedAt(),
                 snapshot.evaluationMode().name(),
                 snapshot.weatherProvenance(),
-                snapshot.disruptionImpactMinutes());
+                snapshot.disruptionImpactMinutes(),
+                snapshot.nextStationHistoricalAdjustmentMinutes(),
+                snapshot.nextStationHistoricalAdjustmentSource().name(),
+                snapshot.nextStationHistoricalAdjustmentProvenance(),
+                snapshot.predictedExtraDelayMinutes());
     }
 
     public PredictionSnapshot toDomain(PredictionSnapshotEntity entity) {
@@ -56,6 +60,10 @@ public class PredictionSnapshotEntityMapper {
                 entity.getEvaluatedAt(),
                 PredictionEvaluationMode.valueOf(entity.getEvaluationMode()),
                 entity.getWeatherProvenance(),
-                entity.getDisruptionImpactMinutes());
+                entity.getDisruptionImpactMinutes(),
+                entity.getNextStationHistoricalAdjustmentMinutes(),
+                HistoricalAdjustmentSource.valueOf(entity.getNextStationHistoricalAdjustmentSource()),
+                entity.getNextStationHistoricalAdjustmentProvenance(),
+                entity.getPredictedExtraDelayMinutes());
     }
 }

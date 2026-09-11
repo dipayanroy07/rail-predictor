@@ -13,6 +13,8 @@ import com.railpredictor.model.domain.RemainingRouteHistoricalStatus;
 import com.railpredictor.model.domain.RemainingRouteHistoricalSummary;
 import com.railpredictor.model.domain.RouteCompleteness;
 import com.railpredictor.model.domain.RouteSection;
+import com.railpredictor.model.domain.SectionHistoricalDelayResult;
+import com.railpredictor.model.domain.SectionHistoricalDelayStatus;
 import com.railpredictor.model.domain.SimulationResult;
 import com.railpredictor.model.domain.WeatherData;
 import com.railpredictor.model.enums.SectionType;
@@ -140,6 +142,21 @@ public class PredictionEngine {
         int predictedTotalDelayMinutes = Math.max(0, train.currentDelayMinutes() + predictedExtraDelayMinutes
                 + historicalAdjustmentMinutes + disruptionImpactMinutes);
 
+        // Phase 21: a SEPARATE, next-station-scoped historical contribution - never
+        // historicalAdjustmentMinutes above, which (when its source is SECTION) is the sum over
+        // the ENTIRE remaining route and is therefore only valid for the destination-scoped
+        // predictedTotalDelayMinutes/predictedEta computed above. See docs/prediction-model.md's
+        // Phase 21 notes for the full reasoning. disruptionImpactMinutes, by contrast, is already
+        // correctly next-section-scoped (DisruptionImpactAggregator is only ever given the current
+        // section) and is reused as-is below - no new disruption term is needed.
+        HistoricalResolutionOutcome nextStationHistoricalOutcome =
+                resolveNextStationHistoricalAdjustment(historicalDelay, sectionHistoricalSummary);
+        int nextStationHistoricalAdjustmentMinutes = nextStationHistoricalOutcome.adjustmentMinutes();
+        HistoricalAdjustmentResolution nextStationHistoricalAdjustmentResolution = nextStationHistoricalOutcome.resolution();
+
+        int predictedNextStationDelayMinutes = Math.max(0, train.currentDelayMinutes() + predictedExtraDelayMinutes
+                + nextStationHistoricalAdjustmentMinutes + disruptionImpactMinutes);
+
         // Deliberately does NOT add currentDelayMinutes: "now" already reflects however delayed
         // the train currently is, so this is the time remaining from the current moment onward,
         // not a projection from the original scheduled departure. See docs/prediction-model.md.
@@ -185,7 +202,10 @@ public class PredictionEngine {
                 List.copyOf(warnings),
                 resolution,
                 weather == null ? null : weather.source(),
-                disruptionImpactAssessment);
+                disruptionImpactAssessment,
+                nextStationHistoricalAdjustmentMinutes,
+                nextStationHistoricalAdjustmentResolution,
+                predictedNextStationDelayMinutes);
     }
 
     /**
@@ -214,6 +234,50 @@ public class PredictionEngine {
     }
 
     private record HistoricalResolutionOutcome(int adjustmentMinutes, HistoricalAdjustmentResolution resolution) {
+    }
+
+    /**
+     * The next-station-scoped counterpart to {@link #resolveHistoricalAdjustment} (Phase 21).
+     * <b>Only the immediate next section (index 0 of {@code sectionHistoricalSummary.sectionResults()})
+     * may contribute a SECTION-sourced adjustment here</b> - never
+     * {@code sectionHistoricalSummary.totalDelayChangeMinutes()}, which sums every remaining
+     * section and therefore describes the whole remaining route, not "what happens between here
+     * and the next station." This can genuinely resolve to a different source than
+     * {@link #resolveHistoricalAdjustment} would (e.g. the immediate section itself has no usable
+     * history but a later remaining section does - {@code resolveHistoricalAdjustment} would still
+     * report {@code SECTION}, using the later section's contribution, which is entirely legitimate
+     * for the destination-scoped total but not for a next-station value) - this method falls back
+     * to station-level history in that case instead, exactly as if no section data existed at all.
+     *
+     * <p>The existing station-level fallback ({@code HistoricalDelayCalculator}) is already
+     * correctly next-station-scoped without any change: {@code PredictionService} always fetches
+     * {@code HistoricalDelay} for the current section (current station → next station), never the
+     * remaining route - see docs/prediction-model.md's Phase 21 notes.
+     */
+    private HistoricalResolutionOutcome resolveNextStationHistoricalAdjustment(
+            HistoricalDelay historicalDelay, RemainingRouteHistoricalSummary sectionHistoricalSummary) {
+        List<SectionHistoricalDelayResult> sectionResults = sectionHistoricalSummary.sectionResults();
+        if (!sectionResults.isEmpty()) {
+            SectionHistoricalDelayResult immediateSection = sectionResults.get(0);
+            if (immediateSection.status() == SectionHistoricalDelayStatus.AVAILABLE) {
+                int minutes = sectionHistoricalDelayCalculator.weightedMinutes(
+                        immediateSection.profile().averageDelayChangeMinutes());
+                return new HistoricalResolutionOutcome(
+                        minutes,
+                        new HistoricalAdjustmentResolution(
+                                HistoricalAdjustmentSource.SECTION, immediateSection.profile().source()));
+            }
+        }
+
+        Integer stationAdjustmentMinutes = historicalDelayCalculator.historicalAdjustmentMinutes(historicalDelay);
+        if (stationAdjustmentMinutes != null) {
+            return new HistoricalResolutionOutcome(
+                    stationAdjustmentMinutes,
+                    new HistoricalAdjustmentResolution(HistoricalAdjustmentSource.STATION_FALLBACK, historicalDelay.source()));
+        }
+
+        return new HistoricalResolutionOutcome(
+                0, new HistoricalAdjustmentResolution(HistoricalAdjustmentSource.NONE, DataProvenance.UNAVAILABLE));
     }
 
     private static void addHistoricalWarnings(

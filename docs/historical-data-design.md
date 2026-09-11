@@ -2029,3 +2029,228 @@ shape* (`now + baseTravelTime + predictedExtraDelay + historicalAdjustment`, and
 `currentDelay + predictedExtraDelay + historicalAdjustment` for total delay) is unchanged since
 Phase 11 - what Phase 16H-2 changed is only *which source* supplies `historicalAdjustmentMinutes`,
 never the formula around it.
+
+## Phase 22: making the real evaluation-data collection pipeline operational and trustworthy
+
+Phase 21 corrected the evaluated metric's arithmetic. Phase 22 makes the pipeline that *feeds* that
+metric with real evidence actually reliable - **not** a calibration phase: no weight was tuned, no
+coefficient was fit, no accuracy claim was made. The goal is exactly:
+
+```
+REAL LIVE PREDICTION → SNAPSHOT STORED → LATER REAL RAILRADAR OBSERVATION
+  → MATCHED TO NEXT-STATION OUTCOME → EVALUATED → REPORTED (still INSUFFICIENT_DATA today)
+```
+
+### The one real bug this phase found and fixed
+
+**`PredictionOutcomeMatcher.evaluate()` was silently corrupting every Phase 21 field the instant a
+snapshot was evaluated.** It reconstructed the evaluated snapshot via the *pre-Phase-21*
+`PredictionSnapshot` constructor - which resets `nextStationHistoricalAdjustmentMinutes`/`_source`/
+`_provenance` to `0`/`NONE`/`UNAVAILABLE` and re-derives `predictedExtraDelayMinutes` as
+`predictedNextStationDelayMinutes - currentDelayMinutes` (which, once historical/disruption
+contributed to that sum, silently misattributes their contribution to "simulation"). This was a
+correctness regression introduced by Phase 21 (the constructor was updated, but this one call site
+wasn't) - not a data-volume problem, and not something more real snapshots would ever have revealed
+on their own, since it corrupted every single evaluated row identically. Fixed by using the full
+canonical constructor and copying every Phase 21 field verbatim, exactly like every pre-existing
+field the matcher already carried through unchanged. See `PredictionOutcomeMatcherTest
+.phase21NextStationFieldsAreCarriedThroughUnchangedNeverResetOrMisderived` for the regression test.
+
+### Everything else the audit confirmed was already correct
+
+- **`predictionMadeAt`** (`PredictionSnapshotRecorder`) is `Instant.now(clock)`, captured at the
+  moment the live prediction result is handed to the recorder - never a DB-assigned/insertion
+  timestamp. Now covered by a dedicated test using a clock deliberately far from wall-clock "now".
+- **Temporal leakage protection** (`PredictionOutcomeMatcher`) - `observation.observedAt().isAfter
+  (snapshot.predictionMadeAt())`, strict, so an observation at the exact same instant is
+  conservatively excluded too - already exhaustively tested (before/at/after/ambiguous cases) since
+  Phase 16H-5/16H-7; unchanged by this phase.
+- **Idempotency**: `HistoricalObservationRecorder` upserts on the natural key (trainNumber,
+  journeyDate, stationCode, stationSequence) with a `DataIntegrityViolationException` fallback for
+  concurrent duplicates (already tested); `PredictionOutcomeMatcher` never re-evaluates a snapshot
+  once it leaves `PENDING` (already tested); `prediction_snapshots` deliberately has **no** unique
+  constraint on (train, station, time) - each live request legitimately produces a new, distinct
+  snapshot, and treating repeats as duplicates would be wrong, not a bug.
+- **Provenance**: real RailRadar-derived observations are always tagged `DataProvenance.RAILRADAR`
+  (`HistoricalObservationMapper`), never `MOCK`; unavailable data stays `DataProvenance.UNAVAILABLE`
+  or a `null` field - confirmed by direct code trace, no change needed.
+- **No hardcoded credentials**: `RailRadarProperties.apiKey()` remains environment-only
+  (`${RAILRADAR_API_KEY:}`), and `RailRadarClient` still only ever logs `apiKeyConfigured=<bool>`
+  (Phase "RailRadar 503 diagnosis"), never the key itself - unchanged.
+
+### Scheduler ordering - already safe, left unchanged
+
+Historical observation collection is **not** on its own schedule - it happens inline, synchronously,
+as a side effect of every live RailRadar-backed prediction request (`RailRadarTrainDataProvider` →
+`HistoricalObservationRecorder`, piggybacked on the request's own RailRadar call to avoid burning
+extra quota - a deliberate Phase 16E decision, unchanged). Two *separate* things run on their own
+independent schedules: `HistoricalDelayProfileRefreshScheduler` (aggregates raw observations into
+historical *profiles* - prediction *inputs*, unrelated to evaluation) and
+`PredictionEvaluationRefreshScheduler` (matches `PENDING` snapshots against observations - this
+phase's own concern).
+
+Could the evaluation refresh scheduler ever run "too early" and evaluate against stale/absent data?
+**No, by construction, regardless of execution order or timing**: `PredictionOutcomeMatcher`'s
+leakage guard is a real timestamp comparison (`observedAt().isAfter(predictionMadeAt())`), not a
+trust in *when* the refresh happened to run. If the refresh runs before a genuine future observation
+exists, the snapshot simply stays `PENDING` (checked again next tick) - it can never be evaluated
+against a nonexistent or too-early observation. This makes the "1. snapshot, 2. later observation,
+3. evaluation" ordering safe under *any* scheduling interleaving, so no scheduler changes were made.
+
+### Data-quality visibility - now distinguishes "no snapshots" from "no observations either"
+
+`DataQualityAssessor`/`DataQualityReport` gained `historicalObservationCount` (a real count of the
+separate `historical_observations` table). Previously, "no snapshot database configured", "database
+configured but genuinely empty", and "observations are being collected but no snapshots exist yet"
+(e.g. `prediction.evaluation.enabled=false` while live requests still populate observations) all
+collapsed into the same empty report. Now the explanatory note differs for each, and the real
+observation count is always visible even when `totalSnapshots` is `0`.
+
+### What Phase 22 deliberately did NOT do
+
+No candidate historical weight was searched. No disruption coefficient was optimized. No regression
+was fit. No confidence weight was changed. The evaluation target is still next-station arrival
+delay. `overallCalibrationStatus` remains `INSUFFICIENT_DATA` - this phase makes the pipeline that
+*feeds* real evidence trustworthy; it does not manufacture evidence or a premature calibration
+result.
+
+### Enabling real, operational data collection
+
+No new configuration property was introduced - every property below already existed from earlier
+phases; this is the first place they're documented together as one deliberate operational bundle:
+
+```properties
+SPRING_PROFILES_ACTIVE=postgres        # activates the DataSource/JPA/Flyway autoconfiguration
+                                        # (see application-postgres.properties) and requires a
+                                        # real, reachable PostgreSQL instance - the app now fails
+                                        # loudly at startup if it can't connect, rather than
+                                        # silently falling back to no persistence.
+HISTORICAL_PROVIDER=postgres           # historical.provider - station-level historical reads
+HISTORICAL_SECTION_PROVIDER=postgres   # historical.section-provider - section-level historical reads
+PREDICTION_EVALUATION_ENABLED=true     # prediction.evaluation.enabled - records a snapshot on
+                                        # every live prediction with a next station, and enables
+                                        # the evaluation-refresh scheduler
+WEATHER_PROVIDER=openmeteo             # weather.provider - real Open-Meteo weather instead of the
+                                        # fixed mock reading (mutually exclusive with mock; see
+                                        # docs/configuration.md)
+RAILRADAR_API_KEY=<your-real-key>      # required for any real live prediction at all (see
+                                        # docs/configuration.md's RailRadar section)
+```
+
+`railway-disruption.provider` is deliberately **not** listed above with a recommended value: no
+reliable real-time public source of Indian Railways operational disruptions exists (Phase 18's own
+finding, unchanged) - leave it at whatever is already explicitly configured (`mock` for controlled
+testing, or the default `unavailable`). Never silently substitute `mock` for a genuinely unavailable
+real source.
+
+The existing developer default (no profile active, everything mocked, evaluation disabled) is
+**unchanged** - none of the above is required to run or test the application locally.
+
+### Current known limitations (Phase 22)
+
+- Historical observation collection remains tied to live prediction request volume, not an
+  independent poll - a train nobody requests a prediction for again after passing the target
+  station will never get an observation recorded for it. Documented, not solved, in this phase (a
+  standalone RailRadar poller would need its own quota/rate-limit design - out of this phase's
+  scope).
+- No PostgreSQL instance was available in this environment to integration-test the real persistence
+  path end-to-end; behavior was verified as thoroughly as possible without it (unit/mocked-repository
+  tests, `Optional`-empty-repository code paths, and the full non-DB-dependent test suite).
+- Zero real evaluation snapshots exist in this environment - `CALIBRATION_STATUS` remains
+  `INSUFFICIENT_DATA`, honestly, per this phase's own restriction against manufacturing evidence.
+
+## Phase 22B: an independent, scheduled real-data collection path
+
+Phase 22A's own limitation: historical observation collection was tied entirely to live prediction
+request volume (piggybacked inside `RailRadarTrainDataProvider.getLiveTrainData`) - a train nobody
+requests a prediction for again after passing a station never gets an observation recorded for it.
+Phase 22B adds a second, **independent** collection path that runs on its own schedule, reusing the
+exact same underlying pipeline rather than duplicating it.
+
+### Architecture
+
+```
+HistoricalObservationCollectionScheduler   (@Scheduled, own interval, overlap-guarded)
+        ↓ calls
+HistoricalObservationCollectionService.collectAll()
+        ↓ for each explicitly configured train number
+TrainDataProvider.getLiveTrainData(trainNumber)   -- the SAME interface PredictionService uses
+        ↓ (RailRadarTrainDataProvider's own existing side effect, unchanged)
+HistoricalObservationMapper → HistoricalObservationRecorder → historical_observations
+```
+
+`HistoricalObservationCollectionService` has exactly one collaborator: `TrainDataProvider`. It does
+not know about `RailRadarClient`, does not know about `PredictionEngine`/`PredictionService`, and
+does not construct a `PredictionResult` or `PredictionSnapshot` - **collection cannot create a fake
+prediction by construction**, not merely by convention. The fetched `LiveTrainData` return value is
+deliberately discarded; only the historical-observation side effect (already proven correct by the
+pre-existing `RailRadarTrainDataProviderTest`) matters here.
+
+### Train selection - explicit, never discovered
+
+`historical.collection.train-numbers` is a comma-separated, explicitly operator-configured list -
+empty by default. There is still no reliable "list every currently-running train" RailRadar
+endpoint this codebase has ever verified (Phase 18's own finding), so trains are never scraped,
+discovered, or algorithmically generated. `HistoricalCollectionProperties`' compact constructor
+validates every entry (`\d{5}`, mirroring the existing `PredictionController`/`EvaluationController`
+pattern) and deduplicates (order-preserving) - a repeated entry must never double a train's real
+polling frequency/API cost.
+
+### Scheduling and rate-limit safety
+
+`historical.collection.enabled=false` by default - a real, scheduled RailRadar request (consuming
+real quota - RailRadar's free tier is 1,000 requests/month, see docs/configuration.md's RailRadar
+section) is a genuine new side effect requiring explicit opt-in, mirroring
+`prediction.evaluation.enabled`'s own convention. Even when enabled, an empty `train-numbers` list
+makes the scheduler a safe no-op. The default interval (`3600000` ms = 1 hour) deliberately mirrors
+`historical.profile-refresh.interval-ms`'s own conservative default - polling more aggressively is
+an explicit operator choice, never the out-of-the-box behavior.
+
+**Overlap protection** is a plain `AtomicBoolean` guard, process-local only - it does not coordinate
+across multiple application instances (no distributed lock was introduced; premature for a
+single-instance deployment with no real observation volume yet). If a previous run is still
+executing (e.g. many trains configured, RailRadar responding slowly), the next tick is skipped
+rather than starting a second, overlapping run - verified by a concurrency test using two threads
+and a `CountDownLatch`.
+
+**Failure isolation** operates at two levels: one train's failure never stops the remaining
+configured trains within a single run (`HistoricalObservationCollectionService.collectOne` catches
+`RuntimeException` per train), and one run's failure never prevents the next scheduled tick
+(`HistoricalObservationCollectionScheduler.collect` catches around the whole run, and releases the
+overlap guard in a `finally` block regardless of success/failure).
+
+### What this phase deliberately did not do
+
+No prediction snapshot is ever created by collection. No calibration was implemented. No train
+discovery/crawling was added. No distributed coordination (Kafka/Redis/a distributed lock) was
+introduced - explicitly premature at this stage, per this phase's own scope boundary.
+
+### Configuration
+
+```properties
+historical.collection.enabled=${HISTORICAL_COLLECTION_ENABLED:false}
+historical.collection.interval-ms=${HISTORICAL_COLLECTION_INTERVAL_MS:3600000}
+historical.collection.initial-delay-ms=${HISTORICAL_COLLECTION_INITIAL_DELAY_MS:300000}
+historical.collection.train-numbers=${HISTORICAL_COLLECTION_TRAIN_NUMBERS:}
+```
+
+Example: `HISTORICAL_COLLECTION_ENABLED=true HISTORICAL_COLLECTION_TRAIN_NUMBERS=12952,12002` (plus
+the Phase 22 `postgres`/`prediction.evaluation.enabled` bundle above, for the observations to
+actually persist anywhere).
+
+### Verification performed this phase
+
+- Full unit coverage for the new properties/service/scheduler (parsing/validation/dedup, per-train
+  failure isolation, empty-config safety, disabled-by-default safety, overlap protection under real
+  concurrency, scheduler-failure isolation) - all passing.
+- The full chain from `TrainDataProvider` down to `HistoricalObservationRecorder` is **not**
+  re-tested here - it was already, and remains, covered by the pre-existing
+  `RailRadarTrainDataProviderTest`; Phase 22B's own tests only needed to prove the new scheduler/
+  service correctly *drive* that existing, already-verified interface for each configured train.
+- Clean application startup verified with default configuration (collector disabled) - no
+  unexpected RailRadar activity, no interference with existing endpoints.
+- **Not performed**: an actual scheduled collection run against the real RailRadar API (no train
+  numbers were configured against a real key during this phase - enabling that was intentionally
+  left to the operator, per this phase's "do not enable aggressive scheduled collection merely for
+  testing" instruction) and PostgreSQL persistence of a real collected observation (Docker/Postgres
+  still unavailable in this environment, unchanged from Phase 22/22A).

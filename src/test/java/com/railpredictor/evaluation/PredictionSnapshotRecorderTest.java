@@ -108,6 +108,28 @@ class PredictionSnapshotRecorderTest {
     }
 
     @Test
+    void predictionMadeAtIsTheInjectedClocksInstantNeverSystemTimeOrDbInsertionTime() {
+        // Phase 22 audit: predictionMadeAt must represent when the live prediction was actually
+        // generated - proven here by using a clock deliberately far from wall-clock "now", so a
+        // regression to System.currentTimeMillis()/Instant.now() (no clock) or a DB-assigned
+        // timestamp would make this test fail loudly rather than passing by coincidence.
+        Instant farPast = Instant.parse("2020-01-01T00:00:00Z");
+        Clock distinctClock = Clock.fixed(farPast, ZoneOffset.UTC);
+        PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
+        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        PredictionSnapshotRecorder recorder = new PredictionSnapshotRecorder(
+                Optional.of(repository), new PredictionSnapshotEntityMapper(),
+                new PredictionEvaluationProperties(true), distinctClock);
+
+        recorder.recordSafely(resultWithNextStation(NEXT_STATION));
+
+        org.mockito.ArgumentCaptor<PredictionSnapshotEntity> captor =
+                org.mockito.ArgumentCaptor.forClass(PredictionSnapshotEntity.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getPredictionMadeAt()).isEqualTo(farPast);
+    }
+
+    @Test
     void thePredictedNextStationDelayIsCurrentDelayPlusPredictedExtraDelayNotTheTotal() {
         PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
         when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
@@ -214,6 +236,43 @@ class PredictionSnapshotRecorderTest {
                 org.mockito.ArgumentCaptor.forClass(PredictionSnapshotEntity.class);
         verify(repository).save(captor.capture());
         assertThat(captor.getValue().getDisruptionImpactMinutes()).isNull();
+    }
+
+    @Test
+    void readsPredictedNextStationDelayDirectlyFromTheResultNeverRecomputingIt() {
+        // Phase 21: the recorder must use result.predictedNextStationDelayMinutes() as-is (computed
+        // once, authoritatively, by PredictionEngine) - never currentDelayMinutes +
+        // predictedExtraDelayMinutes, which would silently drop the next-station historical/
+        // disruption contribution.
+        PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
+        when(repository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        PredictionSnapshotRecorder recorder = new PredictionSnapshotRecorder(
+                Optional.of(repository), new PredictionSnapshotEntityMapper(),
+                new PredictionEvaluationProperties(true), CLOCK);
+
+        PredictionResult result = new PredictionResult(
+                "12952", "Rajdhani Express", TrainStatus.RUNNING, CURRENT_STATION, NEXT_STATION,
+                5, 465.0, 919.0, 92.5, SectionType.NORMAL, 90.0, 8, 3, 10, 23,
+                Instant.parse("2026-09-09T11:41:00Z"),
+                new ConfidenceScore(75.0, ConfidenceLevel.MEDIUM, List.of(), List.of()),
+                List.<DisruptionResult>of(), List.<CascadeEffect>of(), List.<String>of(),
+                new HistoricalAdjustmentResolution(HistoricalAdjustmentSource.STATION_FALLBACK, DataProvenance.RAILRADAR),
+                null,
+                com.railpredictor.model.domain.DisruptionImpactAssessment.unavailable(),
+                7,
+                new HistoricalAdjustmentResolution(HistoricalAdjustmentSource.SECTION, DataProvenance.RAILRADAR),
+                20); // deliberately NOT current(5) + extra(8) = 13, to prove it's read as-is
+
+        recorder.recordSafely(result);
+
+        org.mockito.ArgumentCaptor<PredictionSnapshotEntity> captor =
+                org.mockito.ArgumentCaptor.forClass(PredictionSnapshotEntity.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getPredictedNextStationDelayMinutes()).isEqualTo(20);
+        assertThat(captor.getValue().getNextStationHistoricalAdjustmentMinutes()).isEqualTo(7);
+        assertThat(captor.getValue().getNextStationHistoricalAdjustmentSource()).isEqualTo("SECTION");
+        assertThat(captor.getValue().getNextStationHistoricalAdjustmentProvenance()).isEqualTo(DataProvenance.RAILRADAR);
+        assertThat(captor.getValue().getPredictedExtraDelayMinutes()).isEqualTo(8);
     }
 
     @Test

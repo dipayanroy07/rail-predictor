@@ -13,14 +13,13 @@ import org.springframework.stereotype.Component;
 
 /**
  * Compares real prediction accuracy WITH vs. WITHOUT a simulation contribution (Phase 20, spec
- * item 10) - a paired comparison on one single population, partitioned by the <em>derived</em>
- * quantity {@code predictedExtraDelayMinutes = predictedNextStationDelayMinutes -
- * currentDelayMinutes}. This is the one simulation-related ablation directly measurable against
- * the evaluated next-station metric: {@code predictedExtraDelayMinutes} is the only path by which
- * anything simulation computes can ever reach {@code predictedNextStationDelayMinutes} (see
- * {@code PredictionEngine} and docs/prediction-model.md's Phase 20 notes) - no new persistence is
- * required, and no individual one of the six simulated disruption models can be isolated this way
- * (a snapshot records only the aggregate contribution, not which model(s) fired).
+ * item 10) - a paired comparison on one single population, partitioned by
+ * {@code predictedExtraDelayMinutes}, simulation's own directly-persisted raw contribution (Phase
+ * 21 - previously reconstructed as {@code predictedNextStationDelayMinutes - currentDelayMinutes},
+ * which became ambiguous once historical adjustment/disruption impact also started contributing to
+ * {@code predictedNextStationDelayMinutes}; see docs/prediction-model.md's Phase 21 notes). No
+ * individual one of the six simulated disruption models can be isolated this way (a snapshot
+ * records only the aggregate contribution, not which model(s) fired).
  */
 @Component
 public class SimulationContributionEvaluator {
@@ -43,20 +42,16 @@ public class SimulationContributionEvaluator {
         assertAlreadyEvaluated(evaluatedSnapshots);
 
         List<PredictionSnapshot> withContribution = evaluatedSnapshots.stream()
-                .filter(s -> extraDelay(s) > 0)
+                .filter(s -> s.predictedExtraDelayMinutes() > 0)
                 .toList();
         List<PredictionSnapshot> withoutContribution = evaluatedSnapshots.stream()
-                .filter(s -> extraDelay(s) <= 0)
+                .filter(s -> s.predictedExtraDelayMinutes() <= 0)
                 .toList();
 
         Map<String, AblationVariantResult> result = new LinkedHashMap<>();
         result.put(WITHOUT_SIMULATION_CONTRIBUTION, variantResult(WITHOUT_SIMULATION_CONTRIBUTION, withoutContribution));
         result.put(WITH_SIMULATION_CONTRIBUTION, variantResult(WITH_SIMULATION_CONTRIBUTION, withContribution));
         return result;
-    }
-
-    private static int extraDelay(PredictionSnapshot snapshot) {
-        return snapshot.predictedNextStationDelayMinutes() - snapshot.currentDelayMinutes();
     }
 
     private AblationVariantResult variantResult(String name, List<PredictionSnapshot> subset) {
