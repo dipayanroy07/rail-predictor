@@ -24,17 +24,29 @@ import org.springframework.stereotype.Component;
  * step (see {@link LiveTrainDataMapper}'s own Javadoc) - this class is the one place
  * {@link RouteStop} is translated into historical-observation data.
  *
- * <p><b>Eligibility (Phase 16E):</b> a stop produces an observation when it has <em>either</em> a
- * genuine arrival or departure event ({@code actualArrival() != null || actualDeparture() != null}
- * ) - a station still entirely ahead of the train isn't a historical fact yet, just a schedule.
- * Before Phase 16E, eligibility required an arrival, which silently and systematically excluded
- * every journey's <b>origin station</b> (a train never "arrives" at its own origin - it only
- * departs). That exclusion is now fixed: an origin stop with a departure but no arrival is
- * eligible. Nothing is fabricated to make this work - {@code actualArrival}/
- * {@code arrivalDelayMinutes}/{@code scheduledArrival} stay exactly whatever RailRadar supplied
- * (frequently {@code null} for an origin), and an intermediate stop may just as validly carry only
- * one of the two events, or both, or (before it's reached) neither - see
+ * <p><b>Eligibility (Phase 16E, corrected by Phase 22D):</b> a stop produces an observation when
+ * it has <em>either</em> a genuine arrival or departure event
+ * ({@code actualArrival() != null || actualDeparture() != null}) <b>and</b> {@code status()} does
+ * not indicate the stop hasn't happened yet - see {@link #rejectionReason} for the exact check and
+ * why the null check on its own is not sufficient. Before Phase 16E, eligibility required an
+ * arrival, which silently and systematically excluded every journey's <b>origin station</b> (a
+ * train never "arrives" at its own origin - it only departs). That exclusion is fixed: an origin
+ * stop with a departure but no arrival is eligible. Nothing is fabricated to make this work -
+ * {@code actualArrival}/{@code arrivalDelayMinutes}/{@code scheduledArrival} stay exactly whatever
+ * RailRadar supplied, and an intermediate stop may just as validly carry only one of the two
+ * events, or both, or (before it's reached, and correctly rejected) neither - see
  * {@link HistoricalObservation}'s own Javadoc for why every event field is independently nullable.
+ *
+ * <p><b>Phase 22D finding:</b> RailRadar does <em>not</em> leave {@code actualArrival}/
+ * {@code actualDeparture} null for a stop it hasn't reached - it populates them with the scheduled
+ * time (and the delay fields with {@code 0}), distinguishable only via a separate {@code status}
+ * field ({@code "upcoming"} confirmed against a real response, contrasted with {@code "departed"}
+ * for a genuinely-reached stop). Before this phase, this mapper only checked the actual*
+ * fields for non-null, which - for an "upcoming" stop - incorrectly produced a real-looking
+ * {@link HistoricalObservation} claiming a real arrival that had not happened. See
+ * docs/historical-data-design.md's Phase 22D section for the full incident, evidence, and residual
+ * risk (only the one confirmed "not yet happened" status value is excluded; an unobserved RailRadar
+ * status string with the same meaning would not yet be caught).
  *
  * <p>Each eligible stop is validated independently (Phase 16C data-quality gate, unchanged by
  * Phase 16E - it never depended on arrival/departure presence) before its
@@ -135,9 +147,30 @@ public class HistoricalObservationMapper {
         return now.getHour() < dayStartHour ? now.toLocalDate().minusDays(1) : now.toLocalDate();
     }
 
+    /**
+     * Phase 22D finding, confirmed against a real RailRadar response: for a stop it has not yet
+     * reached, RailRadar does not leave {@code actualArrival}/{@code actualDeparture} null - it
+     * populates them with the scheduled time (and {@code delayArrival}/{@code delayDeparture}
+     * with {@code 0}), while marking {@code status: "upcoming"}. A genuinely-reached stop observed
+     * the same way carried {@code status: "departed"}. This means the null-check above is
+     * necessary but not sufficient: {@code status} is the only field that actually distinguishes
+     * a real event from a scheduled placeholder, so a stop reporting {@code "upcoming"} must never
+     * become a {@link com.railpredictor.model.domain.HistoricalObservation}, no matter what its
+     * actual*/delay* fields say.
+     *
+     * <p>Only {@code "upcoming"} is excluded here because it is the only "not yet happened" status
+     * value this codebase has confirmed against a real response - see
+     * docs/historical-data-design.md's Phase 22D notes for the full finding and its residual risk
+     * (an as-yet-unobserved RailRadar status string with the same "not yet happened" meaning would
+     * not be caught by this check).
+     */
     private String rejectionReason(RouteStop stop) {
         if (stop.stationCode() == null || stop.stationCode().isBlank()) {
             return "missing station code";
+        }
+        if ("upcoming".equalsIgnoreCase(stop.status())) {
+            return "stop has not yet occurred (status=upcoming) - RailRadar reports a scheduled-time "
+                    + "placeholder in actualArrival/actualDeparture for upcoming stops, not a real event";
         }
         if (stop.sequence() != null && stop.sequence() <= 0) {
             return "impossible station sequence: " + stop.sequence();
