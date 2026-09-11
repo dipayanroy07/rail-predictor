@@ -1,0 +1,313 @@
+package com.railpredictor.railradar.mapper;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.railpredictor.config.HistoricalJourneyDateProperties;
+import com.railpredictor.config.HistoricalObservationValidationProperties;
+import com.railpredictor.historical.HistoricalDataMetrics;
+import com.railpredictor.model.domain.DataProvenance;
+import com.railpredictor.model.domain.HistoricalObservation;
+import com.railpredictor.railradar.dto.CurrentLocation;
+import com.railpredictor.railradar.dto.LiveTrainStatusData;
+import com.railpredictor.railradar.dto.NextHalt;
+import com.railpredictor.railradar.dto.RouteStop;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class HistoricalObservationMapperTest {
+
+    private static final Clock FIXED_CLOCK = Clock.fixed(Instant.parse("2026-09-09T15:00:00Z"), ZoneOffset.UTC);
+
+    private final HistoricalDataMetrics metrics = new HistoricalDataMetrics();
+    private final HistoricalObservationMapper mapper = mapperWithDayStartHour(0);
+
+    private HistoricalObservationMapper mapperWithDayStartHour(int dayStartHour) {
+        return new HistoricalObservationMapper(
+                FIXED_CLOCK,
+                new HistoricalObservationValidationProperties(4320),
+                new HistoricalJourneyDateProperties(dayStartHour),
+                metrics);
+    }
+
+    private static RouteStop stop(String code, Integer sequence, String actualArrival) {
+        return stop(code, sequence, actualArrival, 12, 12);
+    }
+
+    private static RouteStop stop(String code, Integer sequence, String actualArrival, Integer arrivalDelay, Integer departureDelay) {
+        return new RouteStop(sequence, code, code + " Station", true, 0.0, 0.0,
+                "20:39", "20:41", actualArrival, actualArrival == null ? null : "20:53",
+                arrivalDelay, departureDelay, "departed", 465.0, null, "1");
+    }
+
+    /** An origin-shaped stop: departure known, no arrival ever recorded (a train doesn't "arrive"
+     * at its own origin). */
+    private static RouteStop originStop(String code, Integer sequence, String actualDeparture, Integer departureDelay) {
+        return new RouteStop(sequence, code, code + " Station", true, 0.0, 0.0,
+                null, "08:00", null, actualDeparture,
+                null, departureDelay, "departed", 0.0, null, "1");
+    }
+
+    private static LiveTrainStatusData dataWithRoute(List<RouteStop> route) {
+        return new LiveTrainStatusData(
+                "12952", "Rajdhani Express", "running", 12, null,
+                new CurrentLocation("KOTA", 5, "departed", true, false, true, 0.4, 92.5, 210),
+                new NextHalt("RTM", "Ratlam Jn", 6, 550.0),
+                route);
+    }
+
+    private static LiveTrainStatusData dataWithRoute(List<RouteStop> route, String lastUpdatedAt) {
+        return new LiveTrainStatusData(
+                "12952", "Rajdhani Express", "running", 12, lastUpdatedAt,
+                new CurrentLocation("KOTA", 5, "departed", true, false, true, 0.4, 92.5, 210),
+                new NextHalt("RTM", "Ratlam Jn", 6, 550.0),
+                route);
+    }
+
+    @Test
+    void extractsOnlyStationsTheTrainHasActuallyReached() {
+        List<RouteStop> route = List.of(
+                stop("NDLS", 1, "16:05"),   // reached - included
+                stop("KOTA", 5, "20:51"),   // reached - included
+                stop("BCT", 9, null));       // not reached yet - excluded
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(route));
+
+        assertThat(observations).hasSize(2);
+        assertThat(observations).extracting(HistoricalObservation::stationCode).containsExactly("NDLS", "KOTA");
+    }
+
+    @Test
+    void mapsEveryFieldFromTheRouteStop() {
+        List<RouteStop> route = List.of(stop("KOTA", 5, "20:51"));
+
+        HistoricalObservation observation = mapper.toObservations("12952", dataWithRoute(route)).get(0);
+
+        assertThat(observation.trainNumber()).isEqualTo("12952");
+        assertThat(observation.journeyDate()).isEqualTo(LocalDate.of(2026, 9, 9));
+        assertThat(observation.stationCode()).isEqualTo("KOTA");
+        assertThat(observation.stationSequence()).isEqualTo(5);
+        assertThat(observation.scheduledArrival()).isEqualTo("20:39");
+        assertThat(observation.actualArrival()).isEqualTo("20:51");
+        assertThat(observation.scheduledDeparture()).isEqualTo("20:41");
+        assertThat(observation.actualDeparture()).isEqualTo("20:53");
+        assertThat(observation.arrivalDelayMinutes()).isEqualTo(12);
+        assertThat(observation.departureDelayMinutes()).isEqualTo(12);
+        assertThat(observation.observedAt()).isEqualTo(Instant.parse("2026-09-09T15:00:00Z"));
+        assertThat(observation.source()).isEqualTo(DataProvenance.RAILRADAR);
+    }
+
+    @Test
+    void emptyOrNullRouteProducesNoObservations() {
+        assertThat(mapper.toObservations("12952", dataWithRoute(List.of()))).isEmpty();
+        assertThat(mapper.toObservations("12952", dataWithRoute(null))).isEmpty();
+    }
+
+    @Test
+    void skipsAStopWithNoStationCodeEvenIfItHasAnActualArrival() {
+        RouteStop malformed = new RouteStop(1, null, "Unknown", true, 0.0, 0.0,
+                "20:39", "20:41", "20:51", "20:53", 12, 12, "departed", 465.0, null, "1");
+
+        assertThat(mapper.toObservations("12952", dataWithRoute(List.of(malformed)))).isEmpty();
+    }
+
+    @Test
+    void rejectsABlankStationCodeWithoutDiscardingOtherRowsInTheBatch() {
+        RouteStop blank = new RouteStop(1, "   ", "Unknown", true, 0.0, 0.0,
+                "20:39", "20:41", "20:51", "20:53", 12, 12, "departed", 465.0, null, "1");
+        RouteStop valid = stop("KOTA", 5, "20:51");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(blank, valid)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).stationCode()).isEqualTo("KOTA");
+        assertThat(metrics.observationsRejected()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsAnImpossibleStationSequenceWithoutDiscardingOtherRowsInTheBatch() {
+        RouteStop impossibleSequence = stop("NDLS", 0, "16:05");
+        RouteStop valid = stop("KOTA", 5, "20:51");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12952", dataWithRoute(List.of(impossibleSequence, valid)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).stationCode()).isEqualTo("KOTA");
+        assertThat(metrics.observationsRejected()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsAnImplausibleDelayWithoutDiscardingOtherRowsInTheBatch() {
+        RouteStop implausibleDelay = stop("NDLS", 1, "16:05", 999_999, 0);
+        RouteStop valid = stop("KOTA", 5, "20:51");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12952", dataWithRoute(List.of(implausibleDelay, valid)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).stationCode()).isEqualTo("KOTA");
+        assertThat(metrics.observationsRejected()).isEqualTo(1);
+    }
+
+    @Test
+    void tracksReceivedAndRejectedCounts() {
+        List<RouteStop> route = List.of(
+                stop("NDLS", 1, "16:05"),
+                stop("KOTA", 0, "20:51"),
+                stop("BCT", 9, null));
+
+        mapper.toObservations("12952", dataWithRoute(route));
+
+        assertThat(metrics.observationsReceived()).isEqualTo(2);
+        assertThat(metrics.observationsRejected()).isEqualTo(1);
+    }
+
+    // --- Phase 16E: origin / event-presence eligibility ---
+
+    @Test
+    void anOriginStopWithDepartureButNoArrivalIsEligible() {
+        RouteStop origin = originStop("NDLS", 1, "08:05", 5);
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(origin)));
+
+        assertThat(observations).hasSize(1);
+        HistoricalObservation observation = observations.get(0);
+        assertThat(observation.stationCode()).isEqualTo("NDLS");
+        assertThat(observation.actualArrival()).isNull();
+        assertThat(observation.scheduledArrival()).isNull();
+        assertThat(observation.arrivalDelayMinutes()).isNull();
+        assertThat(observation.actualDeparture()).isEqualTo("08:05");
+        assertThat(observation.departureDelayMinutes()).isEqualTo(5);
+    }
+
+    @Test
+    void anOriginStopWithMissingDepartureDelayIsStillEligible() {
+        RouteStop origin = originStop("NDLS", 1, "08:05", null);
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(origin)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).departureDelayMinutes()).isNull();
+    }
+
+    @Test
+    void anIntermediateStopWithArrivalButNoDepartureIsEligible() {
+        RouteStop halted = new RouteStop(3, "KOTA", "Kota Jn", true, 0.0, 0.0,
+                "20:39", null, "20:51", null, 12, null, "arrived", 465.0, null, "1");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(halted)));
+
+        assertThat(observations).hasSize(1);
+        HistoricalObservation observation = observations.get(0);
+        assertThat(observation.actualArrival()).isEqualTo("20:51");
+        assertThat(observation.actualDeparture()).isNull();
+        assertThat(observation.departureDelayMinutes()).isNull();
+    }
+
+    @Test
+    void anIntermediateStopWithDepartureButNoArrivalIsEligible() {
+        RouteStop departureOnly = new RouteStop(3, "KOTA", "Kota Jn", true, 0.0, 0.0,
+                null, "20:41", null, "20:53", null, 12, "departed", 465.0, null, "1");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(departureOnly)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).actualArrival()).isNull();
+        assertThat(observations.get(0).actualDeparture()).isEqualTo("20:53");
+    }
+
+    @Test
+    void aStopWithNeitherArrivalNorDepartureIsNotEligible() {
+        RouteStop untouched = new RouteStop(9, "BCT", "Mumbai Central", true, 0.0, 0.0,
+                "23:55", "23:59", null, null, null, null, "scheduled", 1200.0, null, "1");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(untouched)));
+
+        assertThat(observations).isEmpty();
+        assertThat(metrics.observationsReceived()).isZero();
+    }
+
+    // --- Phase 16E: station ordering ---
+
+    @Test
+    void aStopWithNullSequenceIsRetainedNotRejected() {
+        RouteStop noSequence = stop("NDLS", null, "16:05");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(noSequence)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).stationSequence()).isNull();
+    }
+
+    @Test
+    void anOriginStopWithNullSequenceIsRetained() {
+        RouteStop origin = originStop("NDLS", null, "08:05", 5);
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(origin)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).stationSequence()).isNull();
+    }
+
+    // --- Phase 16E: journey identity ---
+
+    @Test
+    void journeyDateDefaultsToPlainCalendarDateWhenDayStartHourIsZero() {
+        // FIXED_CLOCK = 2026-09-09T15:00:00Z, well after any midnight boundary either way.
+        HistoricalObservation observation =
+                mapper.toObservations("12952", dataWithRoute(List.of(stop("KOTA", 5, "20:51")))).get(0);
+
+        assertThat(observation.journeyDate()).isEqualTo(LocalDate.of(2026, 9, 9));
+    }
+
+    @Test
+    void anObservationBeforeTheConfiguredOperatingDayStartHourIsAttributedToThePreviousCalendarDay() {
+        // 2026-09-10T00:30:00Z - just after midnight UTC.
+        Clock justAfterMidnight = Clock.fixed(Instant.parse("2026-09-10T00:30:00Z"), ZoneOffset.UTC);
+        HistoricalObservationMapper overnightMapper = new HistoricalObservationMapper(
+                justAfterMidnight,
+                new HistoricalObservationValidationProperties(4320),
+                new HistoricalJourneyDateProperties(3),
+                new HistoricalDataMetrics());
+
+        HistoricalObservation observation =
+                overnightMapper.toObservations("12952", dataWithRoute(List.of(stop("KOTA", 5, "20:51")))).get(0);
+
+        assertThat(observation.journeyDate()).isEqualTo(LocalDate.of(2026, 9, 9));
+    }
+
+    @Test
+    void anObservationAtOrAfterTheConfiguredOperatingDayStartHourUsesTheLiteralCalendarDate() {
+        // 2026-09-10T03:30:00Z - after the configured 3 AM cutoff.
+        Clock afterCutoff = Clock.fixed(Instant.parse("2026-09-10T03:30:00Z"), ZoneOffset.UTC);
+        HistoricalObservationMapper overnightMapper = new HistoricalObservationMapper(
+                afterCutoff,
+                new HistoricalObservationValidationProperties(4320),
+                new HistoricalJourneyDateProperties(3),
+                new HistoricalDataMetrics());
+
+        HistoricalObservation observation =
+                overnightMapper.toObservations("12952", dataWithRoute(List.of(stop("KOTA", 5, "20:51")))).get(0);
+
+        assertThat(observation.journeyDate()).isEqualTo(LocalDate.of(2026, 9, 10));
+    }
+
+    @Test
+    void journeyDateIsUnaffectedByOpaqueResponseTimestampFields() {
+        // "Unavailable journey-date information": there is no trustworthy date field in the
+        // response at all, so the mapper must never derive journeyDate from lastUpdatedAt or any
+        // other opaque string - only from its own injected Clock.
+        List<RouteStop> route = List.of(stop("KOTA", 5, "20:51"));
+
+        HistoricalObservation withNullTimestamp =
+                mapper.toObservations("12952", dataWithRoute(route, null)).get(0);
+        HistoricalObservation withBogusTimestamp =
+                mapper.toObservations("12952", dataWithRoute(route, "not-a-real-timestamp")).get(0);
+
+        assertThat(withNullTimestamp.journeyDate()).isEqualTo(withBogusTimestamp.journeyDate());
+    }
+}
