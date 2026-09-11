@@ -27,6 +27,12 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
+		<!-- Health/readiness endpoint for deployment (Phase 26) - exposes only /actuator/health by
+		     default (see application.properties), never a full management surface. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 		<!-- WebClient only: spring-webflux + reactor-netty-http, without the full
 		     webflux starter, so the app stays a servlet (Tomcat) app calling an
 		     external API over HTTP, not a reactive server. -->

@@ -1,0 +1,44 @@
+# Local development only. Docker is optional - see README.md for running without it.
+#
+# Usage:
+#   docker compose up -d postgres     # just the database, run the app yourself with mvnw
+#   docker compose --profile app up   # database + the application container (builds Dockerfile)
+#
+# No real secret is stored here - POSTGRES_PASSWORD below is a local-development-only default
+# (never used in any deployed environment); override it via a real .env file (untracked, see
+# .gitignore) if you want a different one.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: railpredictor
+      POSTGRES_USER: railpredictor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-railpredictor-local-dev-only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - railpredictor-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U railpredictor -d railpredictor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    profiles: ["app"]
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      DB_URL: jdbc:postgresql://postgres:5432/railpredictor
+      DB_USERNAME: railpredictor
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-railpredictor-local-dev-only}
+      RAILRADAR_API_KEY: ${RAILRADAR_API_KEY:?set RAILRADAR_API_KEY in your shell or a local .env file}
+
+volumes:
+  railpredictor-postgres-data:

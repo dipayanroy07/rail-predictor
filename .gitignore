@@ -1,4 +1,8 @@
 target/
+
+# Real secrets must never be committed - only .env.example (placeholders only) is tracked.
+.env
+.env.local
 pom.xml.tag
 pom.xml.releaseBackup
 pom.xml.versionsBackup
