@@ -19,3 +19,10 @@ buildNumber.properties
 .project
 # JDT-specific (Eclipse Java Development Tools)
 .classpath
+
+# IntelliJ project files - IDE-specific, never shared between developers.
+.idea/
+
+# Stray local artifacts that must never be tracked (repo-hygiene fix, Phase 26 clean-clone audit).
+*.zip
+prediction_output.json
