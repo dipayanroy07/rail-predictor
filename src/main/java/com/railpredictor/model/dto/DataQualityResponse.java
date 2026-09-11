@@ -19,5 +19,6 @@ public record DataQualityResponse(
         Instant earliestPredictionMadeAt,
         Instant latestPredictionMadeAt,
         String pointInTimeReproducibilityNote,
-        int historicalObservationCount) {
+        int historicalObservationCount,
+        int quarantinedSnapshots) {
 }

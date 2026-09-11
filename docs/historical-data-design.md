@@ -2254,3 +2254,107 @@ actually persist anywhere).
   left to the operator, per this phase's "do not enable aggressive scheduled collection merely for
   testing" instruction) and PostgreSQL persistence of a real collected observation (Docker/Postgres
   still unavailable in this environment, unchanged from Phase 22/22A).
+
+## Phase 22D: RailRadar journey-date / stale-arrival integrity audit
+
+Phase 22C's controlled activation (with a real PostgreSQL database and a real RailRadar key)
+produced one snapshot marked `EVALUATED_EXACT` with `bias: 3.0` (predicted 3 minutes, "actual" 0
+minutes at NDLS) within roughly 12 minutes of the prediction being made - while the train's own
+live data, at prediction time, showed it 275 km from NDLS. No train covers 275 km in 12 minutes
+(that implies an average speed of ~1,375 km/h). This phase traced the root cause conclusively.
+
+### The confirmed root cause
+
+A real RailRadar response for train 22415 was inspected directly. For the not-yet-reached
+destination (NDLS):
+
+```json
+{
+  "stationCode": "NDLS", "status": "upcoming",
+  "scheduledArrival": "2026-09-11T14:05:00+05:30",
+  "actualArrival":     "2026-09-11T14:05:00+05:30",
+  "delayArrival": 0
+}
+```
+
+For a genuinely-reached stop (BBL) taken from the same response:
+
+```json
+{ "stationCode": "BBL", "status": "departed" }
+```
+
+**RailRadar does not leave `actualArrival`/`actualDeparture` null for a stop it hasn't reached - it
+populates them with the scheduled time (delay `0`), and the only field that distinguishes this from
+a real event is `status`.** `HistoricalObservationMapper`'s eligibility check, before this phase,
+tested only `actualArrival() != null || actualDeparture() != null` - which this evidence shows is
+**not sufficient**: an "upcoming" stop passes that check and produces a real-looking
+`HistoricalObservation` claiming a real arrival that has not happened.
+
+This is a genuine, confirmed defect (not a heuristic, not a guess) - fixed by adding a `status`
+check to `HistoricalObservationMapper.rejectionReason` that rejects any stop reporting
+`"upcoming"` (case-insensitively), regardless of what its `actual*`/`delay*` fields say. A
+regression test (`aGenuinelyDepartedStopWithTheSameShapeOfDataRemainsEligible`) specifically proves
+this is keyed off `status` alone, never off `actualArrival == scheduledArrival` or `delayArrival ==
+0` - both of which a real, genuinely-on-time arrival would also show.
+
+**Residual risk, explicitly not claimed to be fully solved**: only the one confirmed value,
+`"upcoming"`, is excluded. If RailRadar uses another status string with the same "not yet happened"
+meaning (not observed in this session), it would not yet be caught. No exhaustive status vocabulary
+has been confirmed - this codebase does not invent one.
+
+### Does RailRadar supply a reliable journey/run identifier? No.
+
+`LiveTrainStatusData`, `RouteStop`, `CurrentLocation`, `NextHalt`, and `ResponseMeta` were all
+re-inspected. None carries a journey ID, run ID, service date, or any field beyond
+`lastUpdatedAt`/`meta.timestamp` (both opaque, unconfirmed-format strings unrelated to journey
+identity - unchanged finding from Phase 16E). **NO RELIABLE JOURNEY IDENTITY IS AVAILABLE FROM
+CURRENT RAILRADAR DATA.** `journeyDate` (this application's own observation-date, derived from its
+own clock - see `HistoricalJourneyDateProperties`) remains the only date-like field, and it was
+never intended to be, and is not, a verified physical-journey identifier.
+
+### `observedAt` vs. `actualArrival`: two different things, now stated precisely
+
+- **`observedAt`** = when this application recorded/persisted the RailRadar response. A real
+  `Instant`, always trustworthy for its own narrow purpose: ordering our own observations in time.
+- **`actualArrival`/`actualDeparture`** = whatever RailRadar's API reports for that field, which
+  (per this phase's finding) is **not reliable proof an event occurred**, on its own, without the
+  `status` check now applied upstream.
+
+`PredictionOutcomeMatcher`'s `observedAt > predictionMadeAt` cutoff is necessary and remains
+unchanged - it is exactly what prevents a pre-existing observation from being misused as a "future"
+outcome. But it was never, on its own, sufficient proof that the *railway event* happened after
+that instant - it only proves *when this application found out about* whatever RailRadar reported.
+That distinction, already present in `HistoricalObservation`'s own Javadoc since Phase 16E, is now
+also stated explicitly in `PredictionOutcomeMatcher`'s Javadoc, cross-referencing exactly which
+upstream check (the Phase 22D fix) is what actually makes a matched observation trustworthy.
+
+### Can the schema distinguish "today's journey" from "yesterday's journey" for the same train?
+
+No, and this remains a documented, accepted limitation, not fixed by this phase: `journeyDate` is
+assigned uniformly to every stop in one response from this application's own clock, never from
+anything RailRadar reports per-stop. No migration was added - no reliable per-journey source field
+exists to justify one (per this phase's own instruction not to add a column without a reliable
+source field). A characterization test
+(`sameTrainAndStationOnDifferentJourneyDatesAreNotDisambiguatedByJourneyIdentity`) documents the
+current, accepted behavior: two observations for the same (train, station) on different
+`journeyDate`s are disambiguated purely by `observedAt` ordering (marked `EVALUATED_APPROXIMATE`,
+never treated as certain) - exactly like same-day repeats, because no journey identity exists to do
+better.
+
+### Classification of the Phase 22C anomaly
+
+**CONFIRMED STALE DATA.** Not "likely," not "unproven" - the raw RailRadar response for the exact
+station and train in question shows conclusively that `actualArrival` for NDLS was a
+scheduled-time placeholder (`status: "upcoming"`), not a real event, at the time it was recorded.
+The two existing snapshots/observations from Phase 22C were **not deleted or modified** - they
+remain in PostgreSQL as real evidence of the incident. Any future evaluation of *new* predictions
+will not repeat this specific defect (the mapper fix prevents the underlying bad observation from
+ever being recorded again), but the already-persisted rows from Phase 22C still reflect it and
+should be understood as an artifact of a bug that has since been fixed, not as data to trust.
+
+### Whether Phase 23 (calibration) is safe to begin
+
+**Still no** - not because of this specific bug (now fixed), but because zero *newly-collected*
+evaluated snapshots exist yet under the corrected mapper, and the underlying data-volume problem
+(Phase 20/21's own finding) is unchanged. This phase fixes a correctness defect in the *collection*
+pipeline; it does not, on its own, produce enough trustworthy evaluated data for calibration.

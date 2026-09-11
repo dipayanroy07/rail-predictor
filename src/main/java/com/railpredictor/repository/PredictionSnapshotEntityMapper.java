@@ -37,7 +37,9 @@ public class PredictionSnapshotEntityMapper {
                 snapshot.nextStationHistoricalAdjustmentMinutes(),
                 snapshot.nextStationHistoricalAdjustmentSource().name(),
                 snapshot.nextStationHistoricalAdjustmentProvenance(),
-                snapshot.predictedExtraDelayMinutes());
+                snapshot.predictedExtraDelayMinutes(),
+                snapshot.quarantined(),
+                snapshot.quarantineReason());
     }
 
     public PredictionSnapshot toDomain(PredictionSnapshotEntity entity) {
@@ -64,6 +66,8 @@ public class PredictionSnapshotEntityMapper {
                 entity.getNextStationHistoricalAdjustmentMinutes(),
                 HistoricalAdjustmentSource.valueOf(entity.getNextStationHistoricalAdjustmentSource()),
                 entity.getNextStationHistoricalAdjustmentProvenance(),
-                entity.getPredictedExtraDelayMinutes());
+                entity.getPredictedExtraDelayMinutes(),
+                entity.isQuarantined(),
+                entity.getQuarantineReason());
     }
 }

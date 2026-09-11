@@ -75,15 +75,23 @@ public class DataQualityAssessor {
 
         List<PredictionSnapshot> snapshots = entities.stream().map(entityMapper::toDomain).toList();
 
-        int exact = countByStatus(snapshots, PredictionEvaluationStatus.EVALUATED_EXACT);
-        int approximate = countByStatus(snapshots, PredictionEvaluationStatus.EVALUATED_APPROXIMATE);
+        int quarantined = (int) snapshots.stream().filter(PredictionSnapshot::quarantined).count();
+
+        // Phase 22E: pending/notEvaluable are exhaustive-by-status regardless of quarantine (a
+        // quarantined snapshot's evaluationStatus is untouched), but evaluated/exact/approximate
+        // must only ever count valid (non-quarantined) evidence - computed below from `evaluated`.
         int pending = countByStatus(snapshots, PredictionEvaluationStatus.PENDING);
         int notEvaluable = countByStatus(snapshots, PredictionEvaluationStatus.NOT_EVALUABLE);
 
         List<PredictionSnapshot> evaluated = snapshots.stream()
                 .filter(s -> s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_EXACT
                         || s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_APPROXIMATE)
+                .filter(s -> !s.quarantined())
                 .toList();
+
+        int validExact = (int) evaluated.stream()
+                .filter(s -> s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_EXACT).count();
+        int validApproximate = evaluated.size() - validExact;
 
         int weatherAvailable = (int) evaluated.stream().filter(s -> s.weatherProvenance() != null).count();
         // Phase 21: historicalAvailable now reflects nextStationHistoricalAdjustmentSource - the
@@ -105,9 +113,10 @@ public class DataQualityAssessor {
         var latest = snapshots.stream().map(PredictionSnapshot::predictionMadeAt).max(java.time.Instant::compareTo).orElse(null);
 
         return new DataQualityReport(
-                snapshots.size(), exact + approximate, exact, approximate, pending, notEvaluable,
+                snapshots.size(), validExact + validApproximate, validExact, validApproximate, pending, notEvaluable,
                 weatherAvailable, historicalAvailable, disruptionAvailable, simulationContributed,
-                distinctTrains, distinctStations, earliest, latest, POINT_IN_TIME_NOTE, (int) observationCount);
+                distinctTrains, distinctStations, earliest, latest, POINT_IN_TIME_NOTE, (int) observationCount,
+                quarantined);
     }
 
     private static int countByStatus(List<PredictionSnapshot> snapshots, PredictionEvaluationStatus status) {

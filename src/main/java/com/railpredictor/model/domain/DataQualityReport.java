@@ -21,6 +21,13 @@ import java.time.Instant;
  * prediction requests aren't being made, or {@code prediction.evaluation.enabled=false}) - three
  * states that {@code totalSnapshots} alone could never tell apart, since it only ever counts the
  * (different) {@code prediction_snapshots} table.
+ *
+ * <p>{@code quarantinedSnapshots} (Phase 22E) counts snapshots marked {@code quarantined} (see
+ * {@code PredictionSnapshotQuarantineService}, migration V10) - known-untrustworthy evaluation
+ * evidence (e.g. matched against a RailRadar "upcoming"-stop placeholder, see Phase 22D) that is
+ * retained in full for audit but excluded from {@code evaluatedSnapshots}/{@code
+ * exactEvaluations}/{@code approximateEvaluations} and every accuracy/calibration computation.
+ * Reported separately so a caller can always see that quarantined evidence exists, never silently.
  */
 public record DataQualityReport(
         int totalSnapshots,
@@ -38,7 +45,8 @@ public record DataQualityReport(
         Instant earliestPredictionMadeAt,
         Instant latestPredictionMadeAt,
         String pointInTimeReproducibilityNote,
-        int historicalObservationCount) {
+        int historicalObservationCount,
+        int quarantinedSnapshots) {
 
     /** Pre-Phase-22 shape, preserved so existing callers/tests need not change: defaults
      * {@code historicalObservationCount} to {@code 0} - correct for any caller not concerned with
@@ -62,7 +70,33 @@ public record DataQualityReport(
         this(totalSnapshots, evaluatedSnapshots, exactEvaluations, approximateEvaluations, pendingSnapshots,
                 notEvaluableSnapshots, weatherAvailableCount, historicalAvailableCount, disruptionImpactAvailableCount,
                 simulationContributedCount, distinctTrainCount, distinctStationCount, earliestPredictionMadeAt,
-                latestPredictionMadeAt, pointInTimeReproducibilityNote, 0);
+                latestPredictionMadeAt, pointInTimeReproducibilityNote, 0, 0);
+    }
+
+    /** Pre-Phase-22E shape, preserved so existing callers/tests need not change: defaults
+     * {@code quarantinedSnapshots} to {@code 0} - correct for any caller not concerned with
+     * distinguishing quarantined evidence from the rest. */
+    public DataQualityReport(
+            int totalSnapshots,
+            int evaluatedSnapshots,
+            int exactEvaluations,
+            int approximateEvaluations,
+            int pendingSnapshots,
+            int notEvaluableSnapshots,
+            int weatherAvailableCount,
+            int historicalAvailableCount,
+            int disruptionImpactAvailableCount,
+            int simulationContributedCount,
+            int distinctTrainCount,
+            int distinctStationCount,
+            Instant earliestPredictionMadeAt,
+            Instant latestPredictionMadeAt,
+            String pointInTimeReproducibilityNote,
+            int historicalObservationCount) {
+        this(totalSnapshots, evaluatedSnapshots, exactEvaluations, approximateEvaluations, pendingSnapshots,
+                notEvaluableSnapshots, weatherAvailableCount, historicalAvailableCount, disruptionImpactAvailableCount,
+                simulationContributedCount, distinctTrainCount, distinctStationCount, earliestPredictionMadeAt,
+                latestPredictionMadeAt, pointInTimeReproducibilityNote, historicalObservationCount, 0);
     }
 
     public DataQualityReport {
@@ -79,6 +113,7 @@ public record DataQualityReport(
         Guard.requireNonNegative(distinctTrainCount, "distinctTrainCount");
         Guard.requireNonNegative(distinctStationCount, "distinctStationCount");
         Guard.requireNonNegative(historicalObservationCount, "historicalObservationCount");
+        Guard.requireNonNegative(quarantinedSnapshots, "quarantinedSnapshots");
         pointInTimeReproducibilityNote = Guard.requireNonBlank(pointInTimeReproducibilityNote, "pointInTimeReproducibilityNote");
         if (exactEvaluations + approximateEvaluations != evaluatedSnapshots) {
             throw new IllegalArgumentException(
@@ -98,6 +133,6 @@ public record DataQualityReport(
      * this record's own Javadoc for why {@code totalSnapshots} alone can't distinguish these
      * states. */
     public static DataQualityReport empty(String note, int historicalObservationCount) {
-        return new DataQualityReport(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, null, note, historicalObservationCount);
+        return new DataQualityReport(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null, null, note, historicalObservationCount, 0);
     }
 }

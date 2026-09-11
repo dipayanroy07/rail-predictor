@@ -99,7 +99,8 @@ public class AccuracyReportMapper {
                 report.earliestPredictionMadeAt(),
                 report.latestPredictionMadeAt(),
                 report.pointInTimeReproducibilityNote(),
-                report.historicalObservationCount());
+                report.historicalObservationCount(),
+                report.quarantinedSnapshots());
     }
 
     private static ConfidenceCalibrationResponse toConfidenceCalibrationResponse(ConfidenceCalibrationReport report) {

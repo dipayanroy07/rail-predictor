@@ -46,6 +46,17 @@ class CalibrationEvaluationReportBuilderTest {
                 75.0, PredictionEvaluationStatus.EVALUATED_EXACT, 6, 2, Instant.parse("2026-09-09T11:00:00Z"));
     }
 
+    private static PredictionSnapshot quarantinedEvaluated() {
+        return new PredictionSnapshot(
+                3L, "12952", Instant.parse("2026-09-09T10:00:00Z"), "KOTA",
+                5, 8, 10, Instant.parse("2026-09-09T12:00:00Z"),
+                3, HistoricalAdjustmentSource.STATION_FALLBACK, DataProvenance.RAILRADAR,
+                75.0, PredictionEvaluationStatus.EVALUATED_EXACT, 6, 2, Instant.parse("2026-09-09T11:00:00Z"),
+                com.railpredictor.model.domain.PredictionEvaluationMode.LIVE_EVALUATION, null, null,
+                0, HistoricalAdjustmentSource.NONE, DataProvenance.UNAVAILABLE, 0,
+                true, "matched against a RailRadar upcoming-stop placeholder (Phase 22D/22C)");
+    }
+
     private static PredictionSnapshot pending() {
         return new PredictionSnapshot(
                 2L, "12952", Instant.parse("2026-09-09T10:00:00Z"), "KOTA",
@@ -85,5 +96,17 @@ class CalibrationEvaluationReportBuilderTest {
         CalibrationEvaluationReport report = builder(30).build(List.of(evaluated()), dataQuality);
 
         assertThat(report.dataQuality()).isEqualTo(dataQuality);
+    }
+
+    @Test
+    void quarantinedSnapshotsAreExcludedFromTheAblationAndConfidenceAnalyses() {
+        DataQualityReport dataQuality = DataQualityReport.empty("no data");
+
+        CalibrationEvaluationReport report =
+                builder(30).build(List.of(evaluated(), quarantinedEvaluated(), pending()), dataQuality);
+
+        int totalAcrossWeatherVariants = report.byWeatherAvailability().values().stream()
+                .mapToInt(v -> v.slice().sampleCount()).sum();
+        assertThat(totalAcrossWeatherVariants).isEqualTo(1); // only the one valid evaluated snapshot
     }
 }

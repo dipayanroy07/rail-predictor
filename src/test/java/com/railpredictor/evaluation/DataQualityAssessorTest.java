@@ -120,6 +120,39 @@ class DataQualityAssessorTest {
         assertThat(report.distinctStationCount()).isEqualTo(1);
     }
 
+    @Test
+    void quarantinedSnapshotsAreCountedSeparatelyAndExcludedFromValidEvaluationCounts() {
+        PredictionSnapshot validExact = evaluated(
+                PredictionEvaluationStatus.EVALUATED_EXACT, "open-meteo", 5, HistoricalAdjustmentSource.SECTION, 8, 5);
+        PredictionSnapshot quarantinedExact = new PredictionSnapshot(
+                2L, "12952", Instant.parse("2026-09-09T10:00:00Z"), "KOTA",
+                5, 8, 10, Instant.parse("2026-09-09T12:00:00Z"),
+                3, HistoricalAdjustmentSource.SECTION, DataProvenance.RAILRADAR,
+                75.0, PredictionEvaluationStatus.EVALUATED_EXACT, 5, 3, Instant.parse("2026-09-09T11:00:00Z"),
+                PredictionEvaluationMode.LIVE_EVALUATION, "open-meteo", 5, 2,
+                HistoricalAdjustmentSource.SECTION, DataProvenance.RAILRADAR, 3,
+                true, "matched against a RailRadar upcoming-stop placeholder (Phase 22D/22C)");
+
+        PredictionSnapshotRepository repository = mock(PredictionSnapshotRepository.class);
+        PredictionSnapshotEntity entity1 = mock(PredictionSnapshotEntity.class);
+        PredictionSnapshotEntity entity2 = mock(PredictionSnapshotEntity.class);
+        when(repository.findAll()).thenReturn(List.of(entity1, entity2));
+
+        PredictionSnapshotEntityMapper mapper = mock(PredictionSnapshotEntityMapper.class);
+        when(mapper.toDomain(entity1)).thenReturn(validExact);
+        when(mapper.toDomain(entity2)).thenReturn(quarantinedExact);
+
+        DataQualityAssessor assessor = new DataQualityAssessor(Optional.of(repository), Optional.empty(), mapper);
+
+        DataQualityReport report = assessor.assess();
+
+        assertThat(report.totalSnapshots()).isEqualTo(2); // audit visibility: quarantined row still counted here
+        assertThat(report.quarantinedSnapshots()).isEqualTo(1);
+        assertThat(report.evaluatedSnapshots()).isEqualTo(1); // only the valid (non-quarantined) evaluation
+        assertThat(report.exactEvaluations()).isEqualTo(1);
+        assertThat(report.approximateEvaluations()).isZero();
+    }
+
     private static PredictionSnapshot evaluated(
             PredictionEvaluationStatus status, String weatherProvenance, Integer disruptionImpactMinutes,
             HistoricalAdjustmentSource historicalSource, int predicted, int actual) {

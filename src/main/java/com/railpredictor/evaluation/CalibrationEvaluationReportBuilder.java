@@ -52,6 +52,7 @@ public class CalibrationEvaluationReportBuilder {
         List<PredictionSnapshot> evaluated = allSnapshots.stream()
                 .filter(s -> s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_EXACT
                         || s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_APPROXIMATE)
+                .filter(s -> !s.quarantined())
                 .toList();
 
         CalibrationAssessment historicalWeightCalibration = historicalWeightAssessor.assess(evaluated);

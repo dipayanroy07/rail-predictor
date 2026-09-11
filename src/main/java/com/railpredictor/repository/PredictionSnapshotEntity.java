@@ -109,6 +109,15 @@ public class PredictionSnapshotEntity {
     @Column(name = "predicted_extra_delay_minutes", nullable = false)
     private int predictedExtraDelayMinutes;
 
+    /** Phase 22E: marks this snapshot's evaluation outcome as known-untrustworthy evidence,
+     * without altering any other column - see
+     * {@link com.railpredictor.model.domain.PredictionSnapshot}'s own Javadoc. */
+    @Column(name = "quarantined", nullable = false)
+    private boolean quarantined;
+
+    @Column(name = "quarantine_reason", length = 500)
+    private String quarantineReason;
+
     protected PredictionSnapshotEntity() {
         // required by JPA
     }
@@ -227,6 +236,8 @@ public class PredictionSnapshotEntity {
                 0, "NONE", "unavailable", predictedNextStationDelayMinutes - currentDelayMinutes);
     }
 
+    /** Pre-Phase-22E shape, preserved so existing callers/tests need not change: defaults
+     * {@code quarantined} to {@code false} and {@code quarantineReason} to {@code null}. */
     public PredictionSnapshotEntity(
             String trainNumber,
             Instant predictionMadeAt,
@@ -250,6 +261,40 @@ public class PredictionSnapshotEntity {
             String nextStationHistoricalAdjustmentSource,
             String nextStationHistoricalAdjustmentProvenance,
             int predictedExtraDelayMinutes) {
+        this(trainNumber, predictionMadeAt, targetStationCode, currentDelayMinutes,
+                predictedNextStationDelayMinutes, predictedTotalDelayMinutes, predictedEta,
+                historicalAdjustmentMinutes, historicalAdjustmentSource, historicalAdjustmentProvenance,
+                confidenceScore, evaluationStatus, actualDelayMinutes, errorMinutes, evaluatedAt,
+                evaluationMode, weatherProvenance, disruptionImpactMinutes,
+                nextStationHistoricalAdjustmentMinutes, nextStationHistoricalAdjustmentSource,
+                nextStationHistoricalAdjustmentProvenance, predictedExtraDelayMinutes, false, null);
+    }
+
+    public PredictionSnapshotEntity(
+            String trainNumber,
+            Instant predictionMadeAt,
+            String targetStationCode,
+            int currentDelayMinutes,
+            int predictedNextStationDelayMinutes,
+            int predictedTotalDelayMinutes,
+            Instant predictedEta,
+            int historicalAdjustmentMinutes,
+            String historicalAdjustmentSource,
+            String historicalAdjustmentProvenance,
+            double confidenceScore,
+            String evaluationStatus,
+            Integer actualDelayMinutes,
+            Integer errorMinutes,
+            Instant evaluatedAt,
+            String evaluationMode,
+            String weatherProvenance,
+            Integer disruptionImpactMinutes,
+            int nextStationHistoricalAdjustmentMinutes,
+            String nextStationHistoricalAdjustmentSource,
+            String nextStationHistoricalAdjustmentProvenance,
+            int predictedExtraDelayMinutes,
+            boolean quarantined,
+            String quarantineReason) {
         this.trainNumber = trainNumber;
         this.predictionMadeAt = predictionMadeAt;
         this.targetStationCode = targetStationCode;
@@ -272,6 +317,8 @@ public class PredictionSnapshotEntity {
         this.nextStationHistoricalAdjustmentSource = nextStationHistoricalAdjustmentSource;
         this.nextStationHistoricalAdjustmentProvenance = nextStationHistoricalAdjustmentProvenance;
         this.predictedExtraDelayMinutes = predictedExtraDelayMinutes;
+        this.quarantined = quarantined;
+        this.quarantineReason = quarantineReason;
     }
 
     public Long getId() {
@@ -366,12 +413,27 @@ public class PredictionSnapshotEntity {
         return predictedExtraDelayMinutes;
     }
 
+    public boolean isQuarantined() {
+        return quarantined;
+    }
+
+    public String getQuarantineReason() {
+        return quarantineReason;
+    }
+
     /** Applies the evaluation outcome onto this (already-persisted) row - the only mutation a
-     * snapshot ever undergoes after creation. */
+     * snapshot ever undergoes after creation, until Phase 22E's quarantine mechanism. */
     public void applyEvaluation(String evaluationStatus, Integer actualDelayMinutes, Integer errorMinutes, Instant evaluatedAt) {
         this.evaluationStatus = evaluationStatus;
         this.actualDelayMinutes = actualDelayMinutes;
         this.errorMinutes = errorMinutes;
         this.evaluatedAt = evaluatedAt;
+    }
+
+    /** Phase 22E: marks this row as known-untrustworthy evidence - never touches any predicted or
+     * observed value, only this pair. See {@link PredictionSnapshotQuarantineService}. */
+    public void applyQuarantine(String reason) {
+        this.quarantined = true;
+        this.quarantineReason = reason;
     }
 }

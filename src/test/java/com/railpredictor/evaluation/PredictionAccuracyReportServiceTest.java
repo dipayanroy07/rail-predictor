@@ -116,6 +116,21 @@ class PredictionAccuracyReportServiceTest {
     }
 
     @Test
+    void excludesQuarantinedSnapshotsFromTheReportWhileStillReadingThemFromTheRepository() {
+        PredictionSnapshotEntity valid = evaluatedEntity("12952", "KOTA", Instant.parse("2026-09-09T10:00:00Z"));
+        PredictionSnapshotEntity quarantinedEntity = evaluatedEntity("12952", "KOTA", Instant.parse("2026-09-09T10:00:00Z"));
+        quarantinedEntity.applyQuarantine("matched against a RailRadar upcoming-stop placeholder (Phase 22D/22C)");
+        when(repository.findByEvaluationStatusIn(List.of("EVALUATED_EXACT", "EVALUATED_APPROXIMATE")))
+                .thenReturn(List.of(valid, quarantinedEntity));
+        PredictionAccuracyReportService service = new PredictionAccuracyReportService(
+                Optional.of(repository), entityMapper, reportBuilder, new PredictionEvaluationProperties(true));
+
+        Optional<PredictionAccuracyReport> report = service.getReport(PredictionAccuracyReportFilter.none());
+
+        assertThat(report.get().overall().sampleCount()).isEqualTo(1);
+    }
+
+    @Test
     void doesNotValidateTheFilterWhenEvaluationIsDisabled() {
         PredictionAccuracyReportService service = new PredictionAccuracyReportService(
                 Optional.of(repository), entityMapper, reportBuilder, new PredictionEvaluationProperties(false));

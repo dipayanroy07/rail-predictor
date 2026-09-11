@@ -23,6 +23,18 @@ import org.springframework.stereotype.Component;
  * never be used as its outcome, full stop - this is what makes evaluation honest rather than
  * circular.
  *
+ * <p><b>What this cutoff does and does not prove (Phase 22D):</b> {@code observedAt} is
+ * <em>only</em> "when this application recorded the observation" - never assume it equals "when
+ * the railway event itself occurred" (see {@link HistoricalObservation}'s own Javadoc). This
+ * cutoff is still correct and necessary - it is exactly what prevents a genuinely pre-existing
+ * observation from being used as a "future" outcome - but it is not, on its own, proof that the
+ * matched {@code HistoricalObservation} represents a real, already-happened event: that
+ * additionally depends on {@code HistoricalObservationMapper} only ever having produced the
+ * observation from a genuinely-occurred stop in the first place (see its own Javadoc for the
+ * Phase 22D finding on why RailRadar's own {@code actualArrival}/{@code actualDeparture} fields
+ * cannot be trusted for this on their own, and how that is now filtered upstream, before this
+ * class ever sees the observation).
+ *
  * <p><b>Ambiguity handling:</b> zero matching candidates leaves the snapshot {@code PENDING} (the
  * train presumably hasn't reached the target station yet - re-checked later). Exactly one
  * candidate is an unambiguous match ({@code EVALUATED_EXACT}). More than one candidate means the
@@ -111,6 +123,8 @@ public class PredictionOutcomeMatcher {
                 snapshot.nextStationHistoricalAdjustmentMinutes(),
                 snapshot.nextStationHistoricalAdjustmentSource(),
                 snapshot.nextStationHistoricalAdjustmentProvenance(),
-                snapshot.predictedExtraDelayMinutes());
+                snapshot.predictedExtraDelayMinutes(),
+                snapshot.quarantined(),
+                snapshot.quarantineReason());
     }
 }

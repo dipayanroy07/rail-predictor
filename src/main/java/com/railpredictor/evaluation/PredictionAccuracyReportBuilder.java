@@ -47,6 +47,7 @@ public class PredictionAccuracyReportBuilder {
         List<PredictionSnapshot> evaluated = snapshots.stream()
                 .filter(s -> s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_EXACT
                         || s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_APPROXIMATE)
+                .filter(s -> !s.quarantined())
                 .toList();
 
         List<Integer> currentModelErrors = evaluated.stream().map(PredictionSnapshot::errorMinutes).toList();
@@ -79,6 +80,7 @@ public class PredictionAccuracyReportBuilder {
         List<PredictionSnapshot> evaluated = snapshots.stream()
                 .filter(s -> s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_EXACT
                         || s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_APPROXIMATE)
+                .filter(s -> !s.quarantined())
                 .toList();
         List<PredictionSnapshot> exactOnlySnapshots = evaluated.stream()
                 .filter(s -> s.evaluationStatus() == PredictionEvaluationStatus.EVALUATED_EXACT)

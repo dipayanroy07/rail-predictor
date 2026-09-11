@@ -28,8 +28,13 @@ class PredictionOutcomeMatcherTest {
 
     private static HistoricalObservation observation(
             String trainNumber, String stationCode, Integer arrivalDelay, Instant observedAt) {
+        return observation(trainNumber, stationCode, arrivalDelay, observedAt, LocalDate.of(2026, 9, 9));
+    }
+
+    private static HistoricalObservation observation(
+            String trainNumber, String stationCode, Integer arrivalDelay, Instant observedAt, LocalDate journeyDate) {
         return new HistoricalObservation(
-                trainNumber, LocalDate.of(2026, 9, 9), stationCode, 5,
+                trainNumber, journeyDate, stationCode, 5,
                 "10:00", "10:05", "10:07", "10:09",
                 arrivalDelay, arrivalDelay, observedAt, DataProvenance.RAILRADAR);
     }
@@ -243,5 +248,82 @@ class PredictionOutcomeMatcherTest {
         assertThat(result.nextStationHistoricalAdjustmentSource()).isEqualTo(HistoricalAdjustmentSource.SECTION);
         assertThat(result.nextStationHistoricalAdjustmentProvenance()).isEqualTo(DataProvenance.RAILRADAR);
         assertThat(result.predictedExtraDelayMinutes()).isEqualTo(8);
+    }
+
+    @Test
+    void quarantineStateIsCarriedThroughUnchangedNeverAppliedOrClearedByEvaluation() {
+        // Phase 22E: evaluating an outcome must never itself quarantine (or un-quarantine) a
+        // snapshot - that is a separate, explicit, evidence-based action (see
+        // PredictionSnapshotQuarantineService / migration V10), never inferred here.
+        PredictionSnapshot snapshot = new PredictionSnapshot(
+                1L, "12952", PREDICTION_MADE_AT, "KOTA",
+                5, 8, 10, Instant.parse("2026-09-09T12:00:00Z"),
+                3, HistoricalAdjustmentSource.STATION_FALLBACK, DataProvenance.RAILRADAR,
+                75.0, PredictionEvaluationStatus.PENDING, null, null, null,
+                com.railpredictor.model.domain.PredictionEvaluationMode.LIVE_EVALUATION, null, null,
+                0, HistoricalAdjustmentSource.NONE, DataProvenance.UNAVAILABLE, 3,
+                true, "matched against a RailRadar upcoming-stop placeholder (Phase 22D/22C)");
+        HistoricalObservation match = observation("12952", "KOTA", 6, Instant.parse("2026-09-09T11:00:00Z"));
+
+        PredictionSnapshot result = matcher.evaluate(snapshot, List.of(match));
+
+        assertThat(result.evaluationStatus()).isEqualTo(PredictionEvaluationStatus.EVALUATED_EXACT);
+        assertThat(result.quarantined()).isTrue();
+        assertThat(result.quarantineReason())
+                .isEqualTo("matched against a RailRadar upcoming-stop placeholder (Phase 22D/22C)");
+    }
+
+    @Test
+    void nonQuarantinedSnapshotsRemainNonQuarantinedAfterEvaluation() {
+        PredictionSnapshot snapshot = pendingSnapshot("12952", "KOTA");
+        HistoricalObservation match = observation("12952", "KOTA", 6, Instant.parse("2026-09-09T11:00:00Z"));
+
+        PredictionSnapshot result = matcher.evaluate(snapshot, List.of(match));
+
+        assertThat(result.quarantined()).isFalse();
+        assertThat(result.quarantineReason()).isNull();
+    }
+
+    // --- Phase 22D: documented residual limitation - no reliable journey identity exists ---
+
+    @Test
+    void observedAtProvesOnlyWhenRecordedNeverWhenTheRailwayEventOccurred() {
+        // Characterization test, not a new guarantee: this matcher's only defense is a real
+        // timestamp comparison (observedAt > predictionMadeAt) - it has no way to know whether the
+        // underlying railway event genuinely happened after predictionMadeAt, only that this
+        // application recorded/persisted the observation after that instant. A HistoricalObservation
+        // instance existing at all is (since Phase 22D) already RailRadar-verified as a genuine,
+        // already-occurred event by HistoricalObservationMapper's own status-based eligibility
+        // check - but that verification happens upstream of this class, not here. This test exists
+        // so a future reader never assumes this class independently re-verifies event authenticity.
+        PredictionSnapshot snapshot = pendingSnapshot("12952", "KOTA");
+        HistoricalObservation observation = observation("12952", "KOTA", 6, Instant.parse("2026-09-09T11:00:00Z"));
+
+        PredictionSnapshot result = matcher.evaluate(snapshot, List.of(observation));
+
+        assertThat(result.evaluationStatus()).isEqualTo(PredictionEvaluationStatus.EVALUATED_EXACT);
+        assertThat(result.evaluatedAt()).isEqualTo(observation.observedAt());
+    }
+
+    @Test
+    void sameTrainAndStationOnDifferentJourneyDatesAreNotDisambiguatedByJourneyIdentity() {
+        // Documents a known, accepted limitation (docs/historical-data-design.md's Phase 22D
+        // section): no RailRadar field reliably identifies a physical journey/run, so two
+        // observations for the same (train, station) on different journeyDates are disambiguated
+        // purely by observedAt ordering - exactly like same-day repeats - never by journey
+        // identity, because none exists. This is NOT a bug to fix here; it is why ambiguous
+        // matches are marked EVALUATED_APPROXIMATE rather than EVALUATED_EXACT.
+        PredictionSnapshot snapshot = pendingSnapshot("12952", "KOTA");
+        HistoricalObservation todayJourney =
+                observation("12952", "KOTA", 6, Instant.parse("2026-09-09T11:00:00Z"), LocalDate.of(2026, 9, 9));
+        HistoricalObservation differentJourneyDate =
+                observation("12952", "KOTA", 99, Instant.parse("2026-09-09T12:00:00Z"), LocalDate.of(2026, 9, 8));
+
+        PredictionSnapshot result = matcher.evaluate(snapshot, List.of(todayJourney, differentJourneyDate));
+
+        // Both are accepted as candidates regardless of journeyDate - ambiguity is correctly
+        // surfaced (APPROXIMATE), but resolved purely by observedAt ordering, not journey identity.
+        assertThat(result.evaluationStatus()).isEqualTo(PredictionEvaluationStatus.EVALUATED_APPROXIMATE);
+        assertThat(result.actualDelayMinutes()).isEqualTo(6); // the earlier-observedAt candidate wins
     }
 }

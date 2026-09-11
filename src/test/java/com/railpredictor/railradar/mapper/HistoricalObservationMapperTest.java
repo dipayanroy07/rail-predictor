@@ -231,6 +231,62 @@ class HistoricalObservationMapperTest {
         assertThat(metrics.observationsReceived()).isZero();
     }
 
+    // --- Phase 22D: "upcoming" stops carry a scheduled-time placeholder, not a real arrival ---
+
+    @Test
+    void anUpcomingStopWithAScheduledTimePlaceholderInActualArrivalIsNotEligible() {
+        // Confirmed against a real RailRadar response for train 22415/NDLS: an unreached stop
+        // reports status "upcoming" while actualArrival == scheduledArrival and delayArrival == 0
+        // - a placeholder, not a real event. The pre-Phase-22D eligibility check (actualArrival
+        // non-null) would have wrongly accepted this as a genuine arrival.
+        RouteStop upcoming = new RouteStop(115, "NDLS", "New Delhi", true, 0.0, 0.0,
+                "2026-09-11T14:05:00+05:30", null, "2026-09-11T14:05:00+05:30", null,
+                0, null, "upcoming", 760.4, null, "12");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(upcoming)));
+
+        assertThat(observations).isEmpty();
+        assertThat(metrics.observationsReceived()).isEqualTo(1); // passed the null-check gate...
+        assertThat(metrics.observationsRejected()).isEqualTo(1); // ...but correctly rejected here
+    }
+
+    @Test
+    void anUpcomingStatusIsRejectedCaseInsensitively() {
+        RouteStop upcoming = new RouteStop(115, "NDLS", "New Delhi", true, 0.0, 0.0,
+                "14:05", null, "14:05", null, 0, null, "UPCOMING", 760.4, null, "12");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(upcoming)));
+
+        assertThat(observations).isEmpty();
+    }
+
+    @Test
+    void aGenuinelyDepartedStopWithTheSameShapeOfDataRemainsEligible() {
+        // Regression guard: the fix must key off status alone, never off actualArrival happening
+        // to equal scheduledArrival or delayArrival happening to be 0 - a real, genuinely-on-time
+        // arrival looks identical in those two fields and must still be accepted.
+        RouteStop onTimeButReal = new RouteStop(76, "BBL", "Balrai", false, 0.0, 0.0,
+                "11:13", "11:13", "11:13", "11:13", 0, 0, "departed", 485.4, 95.8, "1");
+
+        List<HistoricalObservation> observations = mapper.toObservations("12952", dataWithRoute(List.of(onTimeButReal)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).arrivalDelayMinutes()).isZero();
+    }
+
+    @Test
+    void otherStatusesInABatchAreUnaffectedByOneUpcomingStop() {
+        RouteStop departed = stop("BBL", 76, "11:13");
+        RouteStop upcoming = new RouteStop(115, "NDLS", "New Delhi", true, 0.0, 0.0,
+                "14:05", null, "14:05", null, 0, null, "upcoming", 760.4, null, "12");
+
+        List<HistoricalObservation> observations =
+                mapper.toObservations("12952", dataWithRoute(List.of(departed, upcoming)));
+
+        assertThat(observations).hasSize(1);
+        assertThat(observations.get(0).stationCode()).isEqualTo("BBL");
+    }
+
     // --- Phase 16E: station ordering ---
 
     @Test

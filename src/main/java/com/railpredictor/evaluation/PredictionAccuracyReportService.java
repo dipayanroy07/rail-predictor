@@ -71,6 +71,7 @@ public class PredictionAccuracyReportService {
                 .orElseGet(List::of)
                 .stream()
                 .map(entityMapper::toDomain)
+                .filter(s -> !s.quarantined())
                 .filter(filter::matches)
                 .toList();
 

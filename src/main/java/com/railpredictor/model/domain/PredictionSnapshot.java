@@ -82,6 +82,17 @@ import java.time.Instant;
  * - (disruptionImpactMinutes or 0)} would otherwise be ambiguous whenever the sum was clamped at
  * 0 - see {@code PredictionEngine}). Always non-negative (simulation's own contribution is never
  * itself negative - see {@code DelayCalculator}).
+ *
+ * <p>{@code quarantined}/{@code quarantineReason} (Phase 22E) mark a snapshot's evaluation outcome
+ * as known-untrustworthy evidence <b>without deleting or altering anything else</b> -
+ * {@code actualDelayMinutes}/{@code errorMinutes}/{@code evaluatedAt} and every predicted field
+ * remain exactly what was originally computed/observed; only this pair says "do not count this as
+ * valid evaluation evidence." {@code quarantineReason} is required (non-blank) exactly when
+ * {@code quarantined} is {@code true}, and must be {@code null} otherwise - mirroring this
+ * record's own {@code actualDelayMinutes}/{@code evaluationStatus} consistency pattern. See
+ * docs/historical-data-design.md's Phase 22E notes for why this exists (the Phase 22D RailRadar
+ * "upcoming"-placeholder finding) and every accuracy/calibration consumer that excludes quarantined
+ * rows from valid-evidence counts.
  */
 public record PredictionSnapshot(
         Long id,
@@ -106,7 +117,45 @@ public record PredictionSnapshot(
         int nextStationHistoricalAdjustmentMinutes,
         HistoricalAdjustmentSource nextStationHistoricalAdjustmentSource,
         String nextStationHistoricalAdjustmentProvenance,
-        int predictedExtraDelayMinutes) {
+        int predictedExtraDelayMinutes,
+        boolean quarantined,
+        String quarantineReason) {
+
+    /** Pre-Phase-22E shape, preserved so existing callers/tests need not change: defaults
+     * {@code quarantined} to {@code false} and {@code quarantineReason} to {@code null} - correct
+     * for every snapshot created before this phase. */
+    public PredictionSnapshot(
+            Long id,
+            String trainNumber,
+            Instant predictionMadeAt,
+            String targetStationCode,
+            int currentDelayMinutes,
+            int predictedNextStationDelayMinutes,
+            int predictedTotalDelayMinutes,
+            Instant predictedEta,
+            int historicalAdjustmentMinutes,
+            HistoricalAdjustmentSource historicalAdjustmentSource,
+            String historicalAdjustmentProvenance,
+            double confidenceScore,
+            PredictionEvaluationStatus evaluationStatus,
+            Integer actualDelayMinutes,
+            Integer errorMinutes,
+            Instant evaluatedAt,
+            PredictionEvaluationMode evaluationMode,
+            String weatherProvenance,
+            Integer disruptionImpactMinutes,
+            int nextStationHistoricalAdjustmentMinutes,
+            HistoricalAdjustmentSource nextStationHistoricalAdjustmentSource,
+            String nextStationHistoricalAdjustmentProvenance,
+            int predictedExtraDelayMinutes) {
+        this(id, trainNumber, predictionMadeAt, targetStationCode, currentDelayMinutes,
+                predictedNextStationDelayMinutes, predictedTotalDelayMinutes, predictedEta,
+                historicalAdjustmentMinutes, historicalAdjustmentSource, historicalAdjustmentProvenance,
+                confidenceScore, evaluationStatus, actualDelayMinutes, errorMinutes, evaluatedAt,
+                evaluationMode, weatherProvenance, disruptionImpactMinutes,
+                nextStationHistoricalAdjustmentMinutes, nextStationHistoricalAdjustmentSource,
+                nextStationHistoricalAdjustmentProvenance, predictedExtraDelayMinutes, false, null);
+    }
 
     /** Pre-Phase-21 shape, preserved so existing callers/tests need not change: defaults the new
      * historical fields to {@code 0}/{@code NONE}/{@code UNAVAILABLE} and
@@ -257,6 +306,11 @@ public record PredictionSnapshot(
             throw new IllegalArgumentException(
                     "actualDelayMinutes, errorMinutes, and evaluatedAt must all be null when evaluationStatus is "
                             + evaluationStatus);
+        }
+        if (quarantined) {
+            quarantineReason = Guard.requireNonBlank(quarantineReason, "quarantineReason");
+        } else if (quarantineReason != null) {
+            throw new IllegalArgumentException("quarantineReason must be null when quarantined is false");
         }
     }
 }

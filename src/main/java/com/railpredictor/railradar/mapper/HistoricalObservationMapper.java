@@ -156,7 +156,7 @@ public class HistoricalObservationMapper {
      * necessary but not sufficient: {@code status} is the only field that actually distinguishes
      * a real event from a scheduled placeholder, so a stop reporting {@code "upcoming"} must never
      * become a {@link com.railpredictor.model.domain.HistoricalObservation}, no matter what its
-     * actual*/delay* fields say.
+     * {@code actual}/{@code delay} fields say.
      *
      * <p>Only {@code "upcoming"} is excluded here because it is the only "not yet happened" status
      * value this codebase has confirmed against a real response - see

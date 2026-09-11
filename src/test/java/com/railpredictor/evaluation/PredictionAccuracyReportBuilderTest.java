@@ -35,6 +35,20 @@ class PredictionAccuracyReportBuilderTest {
                 75.0, status, actualDelayMinutes, error, Instant.parse("2026-09-09T11:00:00Z"));
     }
 
+    private static PredictionSnapshot quarantinedEvaluated(
+            int currentDelayMinutes, int predictedNextStationDelayMinutes, int actualDelayMinutes,
+            PredictionEvaluationStatus status) {
+        int error = predictedNextStationDelayMinutes - actualDelayMinutes;
+        return new PredictionSnapshot(
+                3L, "12952", Instant.parse("2026-09-09T10:00:00Z"), "KOTA",
+                currentDelayMinutes, predictedNextStationDelayMinutes, 10, Instant.parse("2026-09-09T12:00:00Z"),
+                3, HistoricalAdjustmentSource.STATION_FALLBACK, DataProvenance.RAILRADAR,
+                75.0, status, actualDelayMinutes, error, Instant.parse("2026-09-09T11:00:00Z"),
+                com.railpredictor.model.domain.PredictionEvaluationMode.LIVE_EVALUATION, null, null,
+                0, HistoricalAdjustmentSource.NONE, DataProvenance.UNAVAILABLE, 0,
+                true, "matched against a RailRadar upcoming-stop placeholder (Phase 22D/22C)");
+    }
+
     private static PredictionSnapshot pending() {
         return new PredictionSnapshot(
                 2L, "12952", Instant.parse("2026-09-09T10:00:00Z"), "KOTA",
@@ -211,5 +225,27 @@ class PredictionAccuracyReportBuilderTest {
                 .sampleCount()).isEqualTo(1);
         assertThat(report.byEvaluationMode().get(com.railpredictor.model.domain.PredictionEvaluationMode.HISTORICAL_BACKTEST)
                 .sampleCount()).isZero();
+    }
+
+    @Test
+    void quarantinedSnapshotsAreExcludedFromBuild() {
+        PredictionSnapshot quarantined = quarantinedEvaluated(5, 8, 6, PredictionEvaluationStatus.EVALUATED_EXACT);
+
+        PredictionAccuracyComparison comparison = builder.build(List.of(quarantined));
+
+        assertThat(comparison.currentModel().sampleCount()).isZero();
+        assertThat(comparison.baseline().sampleCount()).isZero();
+    }
+
+    @Test
+    void quarantinedSnapshotsAreExcludedFromBuildReportEveryBreakdown() {
+        PredictionSnapshot quarantined = quarantinedEvaluated(5, 8, 6, PredictionEvaluationStatus.EVALUATED_EXACT);
+        PredictionSnapshot valid = evaluated(5, 8, 6, PredictionEvaluationStatus.EVALUATED_EXACT);
+
+        PredictionAccuracyReport report = builder.buildReport(List.of(quarantined, valid));
+
+        assertThat(report.overall().sampleCount()).isEqualTo(1);
+        assertThat(report.exactOnly().currentModel().sampleCount()).isEqualTo(1);
+        assertThat(report.bySource().get(HistoricalAdjustmentSource.STATION_FALLBACK).sampleCount()).isEqualTo(1);
     }
 }
